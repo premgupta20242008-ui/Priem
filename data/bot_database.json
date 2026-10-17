@@ -1,0 +1,387 @@
+{
+  "config": {
+    "botToken": "8938023719:AAH7sO4tgBh3VbTXSredqlapJFa1JOBuhzc",
+    "botUsername": "PrimeAdsEbot",
+    "botName": "Prime Ads",
+    "isPollingActive": true,
+    "welcomeMessage": "⚠️ You left a required channel/group.\n\nPlease join again and press 🔵 CHECK JOIN.",
+    "leaveAlertMessage": "⚠️ You left a required channel/group.\n\nPlease join again and press 🔵 CHECK JOIN.",
+    "joinButtonText": "🔵 JOIN NOW",
+    "joinButtonColor": "blue",
+    "checkJoinButtonText": "🔵 CHECK JOIN",
+    "checkButtonColor": "green",
+    "bonusButtonText": "🔴 CLAIM BONUS",
+    "bonusButtonColor": "red",
+    "codeButtonText": "🔑 ENTER CLAIM CODE",
+    "codeButtonColor": "amber",
+    "showBonusButton": true,
+    "dailyBonusAmount": 25,
+    "referralBonusAmount": 50,
+    "backupGroupId": "-1002938172654",
+    "backupGroupName": "PrimeAds Database Vault",
+    "autoBackupToGroup": true,
+    "lastBackupTimestamp": "17/10/2026, 05:00:00 AM IST"
+  },
+  "channels": [
+    {
+      "id": "ch-1",
+      "channelId": "@PrimeUpdatesHub",
+      "title": "📢 Prime Official Updates",
+      "inviteLink": "https://t.me/PrimeUpdatesHub",
+      "type": "channel",
+      "required": true,
+      "memberCount": 48290,
+      "addedAt": "2026-10-09T07:56:50.245Z"
+    },
+    {
+      "id": "ch-2",
+      "channelId": "@PrimeVipLounge",
+      "title": "💎 Prime VIP Signals & Drops",
+      "inviteLink": "https://t.me/PrimeVipLounge",
+      "type": "channel",
+      "required": true,
+      "memberCount": 29140,
+      "addedAt": "2026-10-11T07:56:50.245Z"
+    },
+    {
+      "id": "ch-3",
+      "channelId": "@PrimeCommunityChat",
+      "title": "💬 Prime Community Group",
+      "inviteLink": "https://t.me/PrimeCommunityChat",
+      "type": "group",
+      "required": true,
+      "memberCount": 15820,
+      "addedAt": "2026-10-13T07:56:50.245Z"
+    }
+  ],
+  "claimCodes": [],
+  "verificationPost": {
+    "enabled": true,
+    "text": "🎉 *VERIFICATION SUCCESSFUL!*\n\nThank you for joining all our official channels and groups! Your membership has been verified.\n\n👇 You now have full access to our bot features:\n• Daily Bonus rewards\n• Secret Claim Codes redemption\n• Referral system\n• Exclusive direct media drops",
+    "mediaType": "image",
+    "mediaUrl": "/src/assets/images/telegram_bot_hero_1792137087644.jpg",
+    "buttonText": "🔥 View Exclusive Content",
+    "buttonUrl": "https://telegram.org",
+    "secondaryButtonText": "👥 Invite & Earn",
+    "secondaryButtonUrl": "https://telegram.org"
+  },
+  "broadcasts": [
+    {
+      "id": "bc-1",
+      "title": "Welcome Drops & Weekly Giveaway",
+      "type": "instant",
+      "postContent": {
+        "text": "🔥 *WEEKLY GIVEAWAY ANNOUNCEMENT*\n\nAll verified users have been entered into this week's Lucky Draw!\nMake sure you stay in all channels to remain eligible.",
+        "mediaType": "image",
+        "mediaUrl": "/src/assets/images/telegram_bot_hero_1792137087644.jpg",
+        "buttonText": "🎁 Check Status",
+        "buttonUrl": "https://telegram.org"
+      },
+      "status": "sent",
+      "targetAudience": "verified_only",
+      "sentCount": 1420,
+      "totalRecipients": 1420,
+      "createdAt": "2026-10-15T07:56:50.245Z",
+      "executedAt": "2026-10-15T07:56:50.245Z"
+    }
+  ],
+  "admins": [
+    {
+      "id": "admin-1",
+      "telegramId": "1092837465",
+      "username": "prime_owner",
+      "name": "Prime Owner",
+      "role": "owner",
+      "addedAt": "2026-09-16T07:56:50.245Z"
+    },
+    {
+      "id": "admin-2",
+      "telegramId": "9876543210",
+      "username": "tele_mod_rahul",
+      "name": "Rahul (Co-Admin)",
+      "role": "superadmin",
+      "addedAt": "2026-10-06T07:56:50.245Z"
+    },
+    {
+      "id": "admin-1792138053997",
+      "telegramId": "8930129989",
+      "username": "",
+      "name": "PREm",
+      "role": "superadmin",
+      "addedAt": "2026-10-16T08:07:33.997Z"
+    }
+  ],
+  "users": [
+    {
+      "telegramId": "user_101",
+      "username": "alex_trader",
+      "firstName": "Alex",
+      "isVerified": false,
+      "joinedChannels": [
+        "ch-1",
+        "ch-2"
+      ],
+      "joinedAt": "2026-10-11T07:56:50.245Z",
+      "lastActiveAt": "2026-10-16T07:56:50.245Z",
+      "hasLeftRequired": true,
+      "leftChannelsAlertCount": 1,
+      "referralCode": "ref_101",
+      "referralCount": 4,
+      "bonusBalance": 275,
+      "lastBonusClaimDate": "2026-10-15",
+      "claimedCodes": [
+        "VIP2026",
+        "BONUS100"
+      ]
+    },
+    {
+      "telegramId": "user_102",
+      "username": "priya_k",
+      "firstName": "Priya",
+      "isVerified": true,
+      "joinedChannels": [
+        "ch-1",
+        "ch-2",
+        "ch-3"
+      ],
+      "joinedAt": "2026-10-14T07:56:50.245Z",
+      "lastActiveAt": "2026-10-16T07:56:50.245Z",
+      "hasLeftRequired": false,
+      "leftChannelsAlertCount": 0,
+      "referralCode": "ref_102",
+      "referredBy": "user_101",
+      "referralCount": 1,
+      "bonusBalance": 125,
+      "lastBonusClaimDate": "2026-10-16",
+      "claimedCodes": [
+        "VIP2026"
+      ]
+    },
+    {
+      "telegramId": "user_103",
+      "username": "vikram99",
+      "firstName": "Vikram",
+      "isVerified": false,
+      "joinedChannels": [
+        "ch-1"
+      ],
+      "joinedAt": "2026-10-16T03:56:50.245Z",
+      "lastActiveAt": "2026-10-16T07:56:50.245Z",
+      "hasLeftRequired": true,
+      "leftChannelsAlertCount": 1,
+      "referralCode": "ref_103",
+      "referredBy": "user_101",
+      "referralCount": 0,
+      "bonusBalance": 0,
+      "claimedCodes": []
+    },
+    {
+      "telegramId": "sim_user_999",
+      "username": "telegram_tester",
+      "firstName": "You (Tester)",
+      "isVerified": false,
+      "joinedChannels": [
+        "ch-2",
+        "ch-3"
+      ],
+      "joinedAt": "2026-10-16T07:56:59.351Z",
+      "lastActiveAt": "2026-10-16T09:16:41.832Z",
+      "hasLeftRequired": true,
+      "leftChannelsAlertCount": 1,
+      "referralCode": "ref_sim_user_999",
+      "referralCount": 0,
+      "bonusBalance": 0,
+      "claimedCodes": [
+        "VIP2026"
+      ]
+    },
+    {
+      "telegramId": "8930129989",
+      "username": "PREMGUPTA2M",
+      "firstName": "𝐏𝐑𝐄𝐌 𝐆𝐔𝐏𝐓𝐀",
+      "isVerified": false,
+      "joinedChannels": [],
+      "joinedAt": "2026-10-16T08:13:46.173Z",
+      "lastActiveAt": "2026-10-17T12:27:59.119Z",
+      "hasLeftRequired": true,
+      "leftChannelsAlertCount": 0,
+      "referralCode": "ref_8930129989",
+      "referralCount": 0,
+      "bonusBalance": 0,
+      "claimedCodes": []
+    },
+    {
+      "telegramId": "user_test_99",
+      "username": "telegram_tester",
+      "firstName": "You (Tester)",
+      "isVerified": false,
+      "joinedChannels": [],
+      "joinedAt": "2026-10-16T09:22:53.760Z",
+      "lastActiveAt": "2026-10-16T09:22:53.760Z",
+      "hasLeftRequired": false,
+      "leftChannelsAlertCount": 0,
+      "referralCode": "ref_user_test_99",
+      "referralCount": 0,
+      "bonusBalance": 0,
+      "claimedCodes": []
+    },
+    {
+      "telegramId": "user_vault_test",
+      "username": "telegram_tester",
+      "firstName": "You (Tester)",
+      "isVerified": false,
+      "joinedChannels": [],
+      "joinedAt": "2026-10-17T12:23:28.575Z",
+      "lastActiveAt": "2026-10-17T12:23:28.575Z",
+      "hasLeftRequired": false,
+      "leftChannelsAlertCount": 0,
+      "referralCode": "ref_user_vault_test",
+      "referralCount": 0,
+      "bonusBalance": 0,
+      "claimedCodes": []
+    },
+    {
+      "telegramId": "8938023719",
+      "username": "admintest",
+      "firstName": "AdminTest",
+      "isVerified": false,
+      "joinedChannels": [],
+      "joinedAt": "2026-10-17T12:48:53.589Z",
+      "lastActiveAt": "2026-10-17T12:48:53.589Z",
+      "hasLeftRequired": false,
+      "leftChannelsAlertCount": 0,
+      "referralCode": "ref_8938023719",
+      "referralCount": 0,
+      "bonusBalance": 0,
+      "claimedCodes": []
+    }
+  ],
+  "logs": [
+    {
+      "id": "log-1792240642748",
+      "timestamp": "2026-10-17T12:37:22.748Z",
+      "type": "admin",
+      "user": "System",
+      "details": "Bot service STARTED! (Username: @PrimeAdsEbot, Real Polling: true)"
+    },
+    {
+      "id": "log-1792240073562",
+      "timestamp": "2026-10-17T12:27:53.562Z",
+      "type": "admin",
+      "user": "Admin Panel",
+      "details": "Bot configuration updated."
+    },
+    {
+      "id": "log-1792239964059",
+      "timestamp": "2026-10-17T12:26:04.059Z",
+      "type": "admin",
+      "user": "System",
+      "details": "Bot service STARTED! (Username: @PrimeAdsEbot, Real Polling: true)"
+    },
+    {
+      "id": "log-1792239196647",
+      "timestamp": "2026-10-17T12:13:16.647Z",
+      "type": "admin",
+      "user": "System",
+      "details": "Bot service STARTED! (Username: @PrimeAdsEbot, Real Polling: true)"
+    },
+    {
+      "id": "log-1792142225776",
+      "timestamp": "2026-10-16T09:17:05.776Z",
+      "type": "admin",
+      "user": "System",
+      "details": "Bot service STARTED! (Username: @PrimeAdsEbot, Real Polling: true)"
+    },
+    {
+      "id": "log-1792141511864",
+      "timestamp": "2026-10-16T09:05:11.864Z",
+      "type": "admin",
+      "user": "System",
+      "details": "Bot service STARTED! (Username: @PrimeAdsEbot, Real Polling: true)"
+    },
+    {
+      "id": "log-1792140398849",
+      "timestamp": "2026-10-16T08:46:38.849Z",
+      "type": "admin",
+      "user": "Admin Panel",
+      "details": "Bot configuration updated."
+    },
+    {
+      "id": "log-1792140117998",
+      "timestamp": "2026-10-16T08:41:57.998Z",
+      "type": "admin",
+      "user": "System",
+      "details": "Bot service STARTED! (Username: @PrimeAdsEbot, Real Polling: true)"
+    },
+    {
+      "id": "log-1792140016475",
+      "timestamp": "2026-10-16T08:40:16.475Z",
+      "type": "leave",
+      "user": "Alex (user_101)",
+      "details": "Left 💬 Prime Community Group. Bot triggered re-join force alert."
+    },
+    {
+      "id": "log-1792139451383",
+      "timestamp": "2026-10-16T08:30:51.383Z",
+      "type": "admin",
+      "user": "System",
+      "details": "Bot service STARTED! (Username: @PrimeAdsEbot, Real Polling: true)"
+    },
+    {
+      "id": "log-1792138425444",
+      "timestamp": "2026-10-16T08:13:45.444Z",
+      "type": "admin",
+      "user": "System",
+      "details": "Bot service STARTED! (Username: @PrimeAdsEbot, Real Polling: true)"
+    },
+    {
+      "id": "log-1792138079897",
+      "timestamp": "2026-10-16T08:07:59.897Z",
+      "type": "admin",
+      "user": "Admin Panel",
+      "details": "Bot configuration updated."
+    },
+    {
+      "id": "log-1792138053998",
+      "timestamp": "2026-10-16T08:07:33.998Z",
+      "type": "admin",
+      "user": "Owner",
+      "details": "Added new admin: PREm (Telegram ID: 8930129989) with role superadmin"
+    },
+    {
+      "id": "log-1792137434454",
+      "timestamp": "2026-10-16T07:57:14.454Z",
+      "type": "claim",
+      "user": "You (Tester) (sim_user_999)",
+      "details": "Redeemed claim code VIP2026 (Exclusive VIP Loot Box & Links)"
+    },
+    {
+      "id": "log-1792137428465",
+      "timestamp": "2026-10-16T07:57:08.465Z",
+      "type": "verify",
+      "user": "You (Tester) (sim_user_999)",
+      "details": "Passed force-join verification. Delivered post reward."
+    },
+    {
+      "id": "log-1",
+      "timestamp": "2026-10-16T07:56:50.245Z",
+      "type": "verify",
+      "user": "alex_trader (101)",
+      "details": "Joined all 3 required channels and successfully verified."
+    },
+    {
+      "id": "log-2",
+      "timestamp": "2026-10-16T07:26:50.245Z",
+      "type": "claim",
+      "user": "alex_trader (101)",
+      "details": "Redeemed claim code VIP2026."
+    },
+    {
+      "id": "log-3",
+      "timestamp": "2026-10-16T06:56:50.245Z",
+      "type": "leave",
+      "user": "vikram99 (103)",
+      "details": "Detected leaving @PrimeVipLounge. Sent automatic warning & forced re-join."
+    }
+  ]
+}

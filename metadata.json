@@ -1,0 +1,6 @@
+{
+  "name": "TeleForce - Telegram Force Join Bot & Admin Suite",
+  "description": "Enterprise Telegram Force Join Bot with group/channel verification, typing animation, leave detection alerts, secret claim codes, referral tracking, and IST auto-broadcasting engine.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
