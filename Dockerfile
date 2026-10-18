@@ -24,16 +24,15 @@ ENV PORT=3000
 
 # Copy package descriptors and install production dependencies
 COPY package*.json .npmrc* ./
-RUN npm install --omit=dev && npm install -g tsx
+RUN npm install --omit=dev
 
 # Copy built frontend assets and server files
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/server.ts ./server.ts
-COPY --from=builder /app/src/types ./src/types
+COPY --from=builder /app/server.js ./server.js
 COPY --from=builder /app/data ./data
 COPY --from=builder /app/package.json ./package.json
 
 EXPOSE 3000
 
-# Run server with tsx
-CMD ["tsx", "server.ts"]
+# Run server with node
+CMD ["node", "server.js"]

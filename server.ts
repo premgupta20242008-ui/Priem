@@ -1,9 +1,10 @@
-import express, { Request, Response } from 'express';
+import express from 'express';
+import type { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import {
+import type {
   ForceJoinChannel,
   ClaimCode,
   VerificationPost,
@@ -18,11 +19,12 @@ dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const ROOT_DIR = fs.existsSync(path.join(__dirname, 'package.json')) ? __dirname : process.cwd();
 const isProd = process.env.NODE_ENV === 'production';
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 // Persistent file path
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = path.join(ROOT_DIR, 'data');
 const DB_FILE = path.join(DATA_DIR, 'bot_database.json');
 
 // Ensure data directory exists
@@ -2858,7 +2860,7 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     // Serve static files in production
-    const distPath = path.join(__dirname, 'dist');
+    const distPath = path.join(ROOT_DIR, 'dist');
     app.use(express.static(distPath));
     app.get('*', (req: Request, res: Response) => {
       res.sendFile(path.join(distPath, 'index.html'));
