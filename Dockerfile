@@ -3,7 +3,7 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 
 # Copy package descriptors
-COPY package*.json bun.lock* ./
+COPY package*.json bun.lock* .npmrc* ./
 
 # Install all dependencies including devDependencies for build
 RUN npm install
@@ -23,7 +23,7 @@ ENV NODE_ENV=production
 ENV PORT=3000
 
 # Copy package descriptors and install production dependencies
-COPY package*.json ./
+COPY package*.json .npmrc* ./
 RUN npm install --omit=dev && npm install -g tsx
 
 # Copy built frontend assets and server files

@@ -223,7 +223,7 @@ export const HostingGuideModal: React.FC<HostingGuideModalProps> = ({
                       </div>
                       <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800">
                         <span className="text-slate-400 block text-[11px]">Build Command:</span>
-                        <span className="font-mono text-blue-400 font-semibold">npm install && npm run build</span>
+                        <span className="font-mono text-blue-400 font-semibold">npm install --legacy-peer-deps && npm run build</span>
                       </div>
                       <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800">
                         <span className="text-slate-400 block text-[11px]">Start Command:</span>
