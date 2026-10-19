@@ -1153,15 +1153,179 @@ export const TelegramSimulator: React.FC<TelegramSimulatorProps> = ({
         }
       }
 
-      // Handle Admin /broadcast <text>
-      if (text.startsWith('/broadcast')) {
-        const bcastMsg = text.replace('/broadcast', '').trim();
+      // Handle Admin /broadcast or /bc <text>
+      if (text.startsWith('/broadcast') || text.startsWith('/bc')) {
+        let bcastMsg = text.replace(/^\/(broadcast|bc)/, '').trim();
+        let targetLabel = 'All Verified Users';
+        if (text.startsWith('/broadcast_all') || text.startsWith('/bc_all')) {
+          bcastMsg = text.replace(/^\/(broadcast_all|bc_all)/, '').trim();
+          targetLabel = 'All Users (Verified + Unverified)';
+        } else if (text.startsWith('/broadcast_unverified') || text.startsWith('/bc_unverified')) {
+          bcastMsg = text.replace(/^\/(broadcast_unverified|bc_unverified)/, '').trim();
+          targetLabel = 'Pending Unverified Users';
+        } else if (text.startsWith('/broadcast_groups') || text.startsWith('/bc_groups')) {
+          bcastMsg = text.replace(/^\/(broadcast_groups|bc_groups)/, '').trim();
+          targetLabel = 'All Connected Groups & Channels';
+        }
+
+        if (!bcastMsg) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `bot-${Date.now()}`,
+              sender: 'bot',
+              text: `📢 *TELEFORCE WORKABLE BROADCASTING*\n\nUsage:\n• \`/bc <message>\` - Broadcast to all verified users\n• \`/broadcast_all <message>\` - Broadcast to all users\n• \`/broadcast_unverified <message>\` - Broadcast to pending users\n• \`/broadcast_groups <message>\` - Send to all groups/channels\n\n💡 *Pro-Tip:* Reply to *any message, photo, video, or forward* in Telegram with \`/bc\` and the bot will copy & send that exact post to everyone!`,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              isAdminMenu: true
+            }
+          ]);
+          return;
+        }
+
         setMessages((prev) => [
           ...prev,
           {
             id: `bot-${Date.now()}`,
             sender: 'bot',
-            text: `⚡ *BROADCAST SENT!*\n\nBroadcasted to all verified users:\n\n"${bcastMsg || 'Announcement sent.'}"`,
+            text: `⚡ *BROADCAST DISPATCHED SUCCESSFULLY!*\n\n🎯 *Audience:* ${targetLabel}\n👥 *Sent to:* ${channels.length * 28 + 92} users\n❌ *Failed:* 0\n\n📝 *Message Preview:*\n"${bcastMsg}"`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            isAdminMenu: true
+          }
+        ]);
+        return;
+      }
+
+      // Handle Admin /over <code> - instantly mark link OVER ❌ on all users' screens
+      if (text.startsWith('/over')) {
+        const targetCode = text.replace('/over', '').trim().toUpperCase();
+        if (!targetCode) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `bot-${Date.now()}`,
+              sender: 'bot',
+              text: `⚠️ *OVER COMMAND USAGE*\n\nSyntax: \`/over <code>\`\nExample: \`/over VIP2026\`\n\nYeh command chalate hi users ke pass jo link gya tha (jaise https://cgbb.com) wo turant edit hokar \`OVER ❌\` me badal jayega!`,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              isAdminMenu: true
+            }
+          ]);
+          return;
+        }
+
+        // Mutate any message currently on the simulator screen that contains a link or matches code
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.actionType === 'code' || (m.buttonUrl && m.buttonUrl.startsWith('http'))) {
+              return {
+                ...m,
+                text: `❌ *[LINK IS NOW OVER ❌ - EXPIRED]*\n\n${(m.text || '').replace(/https?:\/\/[^\s]+/g, 'OVER ❌')}\n\n🛑 *Notice: Link closed by Admin. Link has been marked OVER ❌.*`,
+                buttonText: '❌ OFFER IS OVER (CLOSED)',
+                buttonUrl: undefined
+              };
+            }
+            return m;
+          })
+        );
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `bot-${Date.now()}`,
+            sender: 'bot',
+            text: `🛑 *CLAIM CODE [${targetCode}] IS NOW OVER ❌*\n\n✅ *User screen links edited:* All links (e.g. https://cgbb.com) have been replaced with *OVER ❌*.\n🔘 *Buttons updated:* Changed to "❌ OFFER IS OVER (CLOSED)".\n⚡ *Affected Users:* All recipients' screens updated!`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            isAdminMenu: true
+          }
+        ]);
+        return;
+      }
+
+      // Handle Admin /delcode or /delete <code> - instantly delete message from users' screens
+      if (text.startsWith('/delcode') || text.startsWith('/delete')) {
+        const targetCode = text.replace(/^\/(delcode|delete)/, '').trim().toUpperCase();
+        // Remove code messages from screen
+        setMessages((prev) => prev.filter((m) => m.actionType !== 'code'));
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `bot-${Date.now()}`,
+            sender: 'bot',
+            text: `🗑️ *RESULT MESSAGE DELETED FROM USERS' SCREENS!*\n\nCode: *${targetCode || 'SPECIFIED'}*\nSabhi users ke screen se message permanently delete kar diya gya hai!`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            isAdminMenu: true
+          }
+        ]);
+        return;
+      }
+
+      // Handle Admin /groups - Groups-Wise View
+      if (text === '/groups') {
+        const groupsSummary = channels
+          .map(
+            (c, i) =>
+              `${i + 1}. *${c.name}* (${c.type.toUpperCase()})\n   • ID: \`${c.chatId}\`\n   • Members: *${c.membersCount || 240}*\n   • Admin Required: *✅ Verified Admin*\n   • Approval Link: \`${c.inviteLink}\``
+          )
+          .join('\n\n');
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `bot-${Date.now()}`,
+            sender: 'bot',
+            text: `📊 *GROUPS & CHANNELS MANAGEMENT*\n\nConnected Channels & Groups:\n\n${groupsSummary || 'No groups configured yet.'}\n\n_Bot auto-verifies Admin rights & generates Join Request Approval Links._`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            isAdminMenu: true
+          }
+        ]);
+        return;
+      }
+
+      // Handle Admin /setinvite <link> - update Invite and Earn link
+      if (text.startsWith('/setinvite')) {
+        const newInvite = text.replace('/setinvite', '').trim();
+        if (newInvite && onUpdateConfig) {
+          await onUpdateConfig({ customInviteLink: newInvite });
+        }
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `bot-${Date.now()}`,
+            sender: 'bot',
+            text: `🎁 *INVITE & EARN LINK UPDATED!*\n\nNew Button Link: \`${newInvite || 'https://t.me/TeleForceBot?start=ref_admin'}\`\n\nUsers clicking the "Invite & Earn" button will now open this URL.`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            isAdminMenu: true
+          }
+        ]);
+        return;
+      }
+
+      // Handle Admin /setexclusive <link> - update View Exclusive link
+      if (text.startsWith('/setexclusive')) {
+        const newExclusive = text.replace('/setexclusive', '').trim();
+        if (newExclusive && onUpdateConfig) {
+          await onUpdateConfig({ exclusiveContentUrl: newExclusive });
+        }
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `bot-${Date.now()}`,
+            sender: 'bot',
+            text: `⭐ *EXCLUSIVE CONTENT LINK UPDATED!*\n\nNew VIP URL: \`${newExclusive || 'https://t.me/TeleForceBot?start=vip'}\`\n\nVerified users can access this exclusive content link.`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            isAdminMenu: true
+          }
+        ]);
+        return;
+      }
+
+      // Handle Admin /cleardata
+      if (text === '/cleardata') {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `bot-${Date.now()}`,
+            sender: 'bot',
+            text: `🧹 *OLD DATA CLEANUP & MAINTENANCE*\n\nData options to clear:\n• Audit Logs (Old activity)\n• Left & Inactive Users\n• Expired Claim Codes\n• Broadcast History\n\n_Aap Web Admin Dashboard ke "Telegram DB Vault -> Clean Data" se 1-click me safely clean kar sakte hain._`,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             isAdminMenu: true
           }
@@ -1211,14 +1375,15 @@ export const TelegramSimulator: React.FC<TelegramSimulatorProps> = ({
         return;
       }
 
-      // Handle Admin /restore
-      if (text.startsWith('/restore')) {
+      // Handle Admin /restore or /recover <groupId>
+      if (text.startsWith('/restore') || text.startsWith('/recover')) {
+        const paramGroup = text.replace(/^\/(restore|recover)/, '').trim() || config.backupGroupId || '-1002938172654';
         setMessages((prev) => [
           ...prev,
           {
             id: `bot-${Date.now()}`,
             sender: 'bot',
-            text: `🔄 *DATABASE RESTORE & RECOVERY GUIDE*\n\nJab aap bot change karein ya data recover karna ho:\n\n1️⃣ Apne Database Backup Telegram Group me jayein: \`${config.backupGroupId || '-1002938172654'}\`\n2️⃣ Kisi bhi \`teleforce_db_backup_*.json\` message par **Reply** karein aur likhein: \`/restore\`\n\nBot turant us JSON backup ko download karke pura database (users, channels, codes) recover kar dega!\n\n_Aap Web Admin Dashboard ke "Telegram DB & Backup" tab se bhi backup upload karke restore kar sakte hain._`,
+            text: `🔄 *DATABASE RESTORE FROM GROUP ID SUCCESSFUL!*\n\n• Source Group ID: \`${paramGroup}\`\n• Backup Snapshot: \`teleforce_backup_pinned.json\`\n• Users Recovered: *120*\n• Channels Recovered: *${channels.length}*\n• Claim Codes Recovered: *${claimCodes.length}*\n\n✅ *Bot crash recovery complete! Database restored to full operation.*`,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             isAdminMenu: true
           }
@@ -1233,7 +1398,7 @@ export const TelegramSimulator: React.FC<TelegramSimulatorProps> = ({
           {
             id: `bot-${Date.now()}`,
             sender: 'bot',
-            text: `💾 *TELEGRAM DATABASE VAULT STATUS*\n\n• Backup Group ID: \`${config.backupGroupId || '-1002938172654'}\`\n• Auto-Sync to Group: *🟢 ACTIVE*\n• Total Channels: *${channels.length}*\n• Active Codes: *${claimCodes.length}*\n\nCommands:\n• \`/backup\` - Send new backup snapshot to group\n• \`/restore\` - Reply to any .json backup to restore\n• \`/setbackupgroup <id>\` - Update vault group`,
+            text: `💾 *TELEGRAM DATABASE VAULT STATUS*\n\n• Backup Group ID: \`${config.backupGroupId || '-1002938172654'}\`\n• Auto-Sync to Group: *🟢 ACTIVE*\n• Total Channels: *${channels.length}*\n• Active Codes: *${claimCodes.length}*\n\nCommands:\n• \`/backup\` - Send new backup snapshot to group\n• \`/restore <groupId>\` - Recover database from group ID\n• \`/over <code>\` - Instantly replace link with OVER ❌\n• \`/groups\` - Groups-wise view\n• \`/setbackupgroup <id>\` - Update vault group`,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             isAdminMenu: true
           }

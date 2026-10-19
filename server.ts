@@ -62,7 +62,17 @@ const defaultDatabase: DatabaseSchema = {
     codeButtonColor: 'amber',
     showBonusButton: true,
     dailyBonusAmount: 25,
-    referralBonusAmount: 50
+    referralBonusAmount: 50,
+    inviteButtonText: '🎁 Invite & Earn',
+    inviteButtonColor: 'blue',
+    inviteCustomLink: '',
+    inviteShareMessage: '🔥 Join this bot, verify in all channels, and get instant VIP access and bonus rewards!',
+    exclusiveContentButtonText: '🔓 View Exclusive Content',
+    exclusiveContentUrl: 'https://t.me/PrimeVipLounge',
+    exclusiveContentColor: 'green',
+    backupGroupId: '',
+    backupGroupName: '',
+    autoBackupToGroup: true
   },
   channels: [
     {
@@ -388,9 +398,51 @@ async function checkTelegramChatMember(token: string, chatId: string, userId: nu
       return ['creator', 'administrator', 'member', 'restricted'].includes(status);
     }
     return false;
-  } catch (err) {
-    console.error(`Error checking membership in ${chatId} for ${userId}:`, err);
+  } catch {
     return false;
+  }
+}
+
+// Real Telegram API helper to check if the Bot itself is an Administrator in the channel/group
+async function checkBotIsAdminInChat(token: string, chatId: string): Promise<{ isAdmin: boolean; canInviteUsers?: boolean; status?: string; error?: string }> {
+  try {
+    const me = await callTelegramApi(token, 'getMe', {});
+    if (!me.ok || !me.result?.id) {
+      return { isAdmin: false, error: 'Could not fetch bot identity from Telegram' };
+    }
+    const botId = me.result.id;
+
+    const res = await callTelegramApi(token, 'getChatMember', {
+      chat_id: chatId,
+      user_id: botId
+    });
+
+    if (res.ok && res.result) {
+      const status = res.result.status;
+      const isAdmin = status === 'administrator' || status === 'creator';
+      const canInviteUsers = res.result.can_invite_users !== false;
+      return { isAdmin, canInviteUsers, status };
+    }
+    return { isAdmin: false, status: res.description || 'Not an admin' };
+  } catch (err: any) {
+    return { isAdmin: false, error: err.message };
+  }
+}
+
+// Telegram API: Bot automatically creates an admin approval join-request invite link
+async function createChatApprovalInviteLink(token: string, chatId: string, name = 'TeleForce Approval Link'): Promise<{ ok: boolean; invite_link?: string; error?: string }> {
+  try {
+    const res = await callTelegramApi(token, 'createChatInviteLink', {
+      chat_id: chatId,
+      name: name,
+      creates_join_request: true
+    });
+    if (res.ok && res.result?.invite_link) {
+      return { ok: true, invite_link: res.result.invite_link };
+    }
+    return { ok: false, error: res.description || 'Failed to create approval invite link' };
+  } catch (err: any) {
+    return { ok: false, error: err.message };
   }
 }
 
@@ -445,15 +497,27 @@ async function backupDatabaseToTelegramGroup(reason = 'Automatic Sync'): Promise
     if (docData && docData.ok) {
       db.config.lastBackupTimestamp = istNow;
       db.config.lastBackupMessageId = docData.result?.message_id;
+      
+      // Auto-pin the backup document in the Telegram group so it can be restored anytime by Group ID
+      try {
+        await callTelegramApi(token, 'pinChatMessage', {
+          chat_id: backupGroupId,
+          message_id: docData.result?.message_id,
+          disable_notification: true
+        });
+      } catch (pinErr) {
+        // Non-fatal if bot lacks pin permission
+      }
+
       db.logs.unshift({
         id: `log-${Date.now()}`,
         timestamp: new Date().toISOString(),
         type: 'admin',
         user: 'Database Vault Engine',
-        details: `Saved database backup document to Telegram Group (${backupGroupId}). Msg ID: ${docData.result?.message_id}`
+        details: `Saved & pinned database backup document in Telegram Group (${backupGroupId}). Msg ID: ${docData.result?.message_id}`
       });
       fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
-      return { ok: true, message: `Backup document sent to Telegram Group (Msg ID: ${docData.result?.message_id})` };
+      return { ok: true, message: `Backup document sent & pinned in Telegram Group (Msg ID: ${docData.result?.message_id})` };
     } else {
       // Fallback to sendMessage if document attachment fails
       const textRes = await callTelegramApi(token, 'sendMessage', {
@@ -481,12 +545,357 @@ async function backupDatabaseToTelegramGroup(reason = 'Automatic Sync'): Promise
   }
 }
 
+// Restore database snapshot from Telegram Group ID (fetch pinned backup document or message)
+async function restoreDatabaseFromTelegramGroup(groupId: string): Promise<{ ok: boolean; message?: string; stats?: any; error?: string }> {
+  const token = db.config.botToken;
+  if (!token) {
+    return { ok: false, error: 'Telegram Bot Token is not configured' };
+  }
+  if (!groupId) {
+    return { ok: false, error: 'Database Vault Group ID is required' };
+  }
+
+  try {
+    const chatRes = await callTelegramApi(token, 'getChat', { chat_id: groupId });
+    if (!chatRes.ok || !chatRes.result) {
+      return { ok: false, error: chatRes.description || `Could not access Telegram Group ${groupId}. Ensure bot is an Admin in the group!` };
+    }
+
+    const pinnedMsg = chatRes.result.pinned_message;
+    let doc = pinnedMsg?.document;
+
+    if (!doc || !doc.file_id) {
+      // Check if backup is in caption or text
+      if (pinnedMsg?.text && pinnedMsg.text.includes('{')) {
+        try {
+          const jsonMatch = pinnedMsg.text.match(/```json\n([\s\S]*?)\n```/) || pinnedMsg.text.match(/(\{[\s\S]*\})/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[1]);
+            if (parsed.users || parsed.channels || parsed.config) {
+              if (parsed.channels) db.channels = parsed.channels;
+              if (parsed.claimCodes) db.claimCodes = parsed.claimCodes;
+              if (parsed.users) db.users = parsed.users;
+              if (parsed.config) db.config = { ...db.config, ...parsed.config };
+              if (parsed.verificationPost) db.verificationPost = parsed.verificationPost;
+              saveDatabase(true);
+              return {
+                ok: true,
+                message: `Database restored from pinned text snapshot in group "${chatRes.result.title || groupId}"!`,
+                stats: { users: db.users.length, channels: db.channels.length, claimCodes: db.claimCodes.length }
+              };
+            }
+          }
+        } catch {}
+      }
+
+      return {
+        ok: false,
+        error: `Connected to group "${chatRes.result.title || groupId}", but no pinned backup JSON document was found. Please ensure the bot has pinned a backup document or reply /restore to the backup file in that group!`
+      };
+    }
+
+    const fileInfo = await callTelegramApi(token, 'getFile', { file_id: doc.file_id });
+    if (!fileInfo.ok || !fileInfo.result?.file_path) {
+      return { ok: false, error: 'Could not fetch file download path from Telegram' };
+    }
+
+    const downloadUrl = `https://api.telegram.org/file/bot${token}/${fileInfo.result.file_path}`;
+    const fileRes = await fetch(downloadUrl);
+    const content = await fileRes.text();
+    const parsedDb = JSON.parse(content);
+
+    if (parsedDb && (parsedDb.users || parsedDb.channels || parsedDb.config)) {
+      if (parsedDb.channels && Array.isArray(parsedDb.channels)) db.channels = parsedDb.channels;
+      if (parsedDb.claimCodes && Array.isArray(parsedDb.claimCodes)) db.claimCodes = parsedDb.claimCodes;
+      if (parsedDb.users && Array.isArray(parsedDb.users)) db.users = parsedDb.users;
+      if (parsedDb.config) db.config = { ...db.config, ...parsedDb.config };
+      if (parsedDb.verificationPost) db.verificationPost = parsedDb.verificationPost;
+      if (parsedDb.admins && Array.isArray(parsedDb.admins)) db.admins = parsedDb.admins;
+      if (parsedDb.broadcasts && Array.isArray(parsedDb.broadcasts)) db.broadcasts = parsedDb.broadcasts;
+
+      db.config.backupGroupId = String(groupId);
+      db.config.backupGroupName = chatRes.result.title || db.config.backupGroupName;
+      saveDatabase(true);
+
+      db.logs.unshift({
+        id: `log-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        type: 'admin',
+        user: 'Database Vault Engine',
+        details: `Restored entire database from Telegram Group ID (${groupId}) pinned backup. Recovered ${db.users.length} users, ${db.channels.length} channels, ${db.claimCodes.length} claim codes.`
+      });
+
+      return {
+        ok: true,
+        message: `Database successfully restored from Group "${chatRes.result.title || groupId}"!`,
+        stats: {
+          users: db.users.length,
+          channels: db.channels.length,
+          claimCodes: db.claimCodes.length,
+          admins: db.admins.length,
+          recoveredAt: getISTDateString()
+        }
+      };
+    }
+
+    return { ok: false, error: 'Backup file was downloaded but contains invalid database structure.' };
+  } catch (err: any) {
+    return { ok: false, error: err.message };
+  }
+}
+
+// Copy-Message Broadcast Engine (replicates exact Telegram messages with media, buttons, formatting)
+async function dispatchCopyBroadcastToUsers(
+  token: string,
+  recipients: BotUser[],
+  fromChatId: number | string,
+  messageId: number
+): Promise<{ sent: number; failed: number }> {
+  let sent = 0;
+  let failed = 0;
+
+  for (const user of recipients) {
+    try {
+      const r = await callTelegramApi(token, 'copyMessage', {
+        chat_id: user.telegramId,
+        from_chat_id: fromChatId,
+        message_id: messageId
+      });
+      if (r.ok) sent++;
+      else failed++;
+    } catch {
+      failed++;
+    }
+    // Rate limit delay between Telegram messages
+    await new Promise((resolve) => setTimeout(resolve, 35));
+  }
+  return { sent, failed };
+}
+
+// Real Telegram Message Dispatcher with rate limiting (35ms delay between sends to prevent 429)
+async function dispatchBroadcastToUsers(
+  token: string,
+  recipients: BotUser[],
+  content: { text: string; mediaType?: string; mediaUrl?: string; buttonText?: string; buttonUrl?: string }
+): Promise<{ sent: number; failed: number }> {
+  let sent = 0;
+  let failed = 0;
+
+  const buttons: any[] = [];
+  if (content.buttonText && content.buttonUrl) {
+    buttons.push([{ text: content.buttonText, url: content.buttonUrl }]);
+  }
+
+  for (const user of recipients) {
+    try {
+      if (content.mediaType === 'image' && content.mediaUrl?.startsWith('http')) {
+        const r = await callTelegramApi(token, 'sendPhoto', {
+          chat_id: user.telegramId,
+          photo: content.mediaUrl,
+          caption: content.text,
+          parse_mode: 'Markdown',
+          reply_markup: buttons.length > 0 ? { inline_keyboard: buttons } : undefined
+        });
+        if (r.ok) sent++;
+        else failed++;
+      } else {
+        const r = await callTelegramApi(token, 'sendMessage', {
+          chat_id: user.telegramId,
+          text: content.text,
+          parse_mode: 'Markdown',
+          reply_markup: buttons.length > 0 ? { inline_keyboard: buttons } : undefined
+        });
+        if (r.ok) sent++;
+        else failed++;
+      }
+    } catch {
+      failed++;
+    }
+    // Rate limit delay (35ms between Telegram messages)
+    await new Promise((resolve) => setTimeout(resolve, 35));
+  }
+
+  return { sent, failed };
+}
+
+// Engine to mark a claim code as OVER ❌ or DELETE messages from users' Telegram screens
+async function markClaimCodeOver(
+  codeIdOrCode: string,
+  action: 'over' | 'delete' = 'over'
+): Promise<{ success: boolean; affectedUsers: number; message: string }> {
+  const code = db.claimCodes.find(
+    (c) => c.id === codeIdOrCode || c.code.toUpperCase() === codeIdOrCode.toUpperCase()
+  );
+  if (!code) {
+    return { success: false, affectedUsers: 0, message: 'Code not found' };
+  }
+
+  code.isOver = true;
+  code.overAt = new Date().toISOString();
+  saveDatabase();
+
+  const token = db.config.botToken;
+  if (!token || !code.sentMessages || code.sentMessages.length === 0) {
+    return {
+      success: true,
+      affectedUsers: 0,
+      message: `Code ${code.code} marked as OVER (no user messages were tracked to modify).`
+    };
+  }
+
+  let count = 0;
+  const originalUrl = code.postContent.buttonUrl || code.postContent.secondaryButtonUrl || '';
+
+  for (const item of code.sentMessages) {
+    if (action === 'delete' && item.isDeleted) continue;
+    if (action === 'over' && item.isOver) continue;
+
+    try {
+      if (action === 'delete') {
+        const delRes = await callTelegramApi(token, 'deleteMessage', {
+          chat_id: item.chatId,
+          message_id: item.messageId
+        });
+        if (delRes.ok) {
+          item.isDeleted = true;
+          count++;
+        }
+      } else {
+        // Replace link with OVER ❌
+        let newText = code.postContent.text;
+        if (originalUrl) {
+          newText = newText.split(originalUrl).join('OVER ❌');
+        }
+        // Also replace any generic URLs in text with OVER ❌
+        newText = newText.replace(/https?:\/\/[^\s]+/g, 'OVER ❌');
+
+        const updatedNotice = `❌ *[LINK IS NOW OVER ❌ - EXPIRED]*\n\n${newText}\n\n🛑 *Notice: This link/offer was closed by Admin and is no longer accessible.*`;
+
+        const overButtons: any[] = [
+          [{ text: '❌ OFFER IS OVER (CLOSED)', callback_data: 'link_over_notice', style: 'danger' }]
+        ];
+
+        let editRes: any;
+        if (code.postContent.mediaType === 'image') {
+          editRes = await callTelegramApi(token, 'editMessageCaption', {
+            chat_id: item.chatId,
+            message_id: item.messageId,
+            caption: updatedNotice,
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: overButtons }
+          });
+        } else {
+          editRes = await callTelegramApi(token, 'editMessageText', {
+            chat_id: item.chatId,
+            message_id: item.messageId,
+            text: updatedNotice,
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: overButtons }
+          });
+        }
+
+        if (editRes.ok) {
+          item.isOver = true;
+          count++;
+        }
+      }
+    } catch {
+      // Ignore user-side telegram errors
+    }
+    // Rate limit delay between message edits (35ms)
+    await new Promise((r) => setTimeout(r, 35));
+  }
+
+  saveDatabase();
+
+  db.logs.unshift({
+    id: `log-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    type: 'admin',
+    user: 'Claim Code Over Engine',
+    details: `Marked code ${code.code} as OVER (${action}). Updated/deleted messages on ${count} users' Telegram chats!`
+  });
+
+  return {
+    success: true,
+    affectedUsers: count,
+    message: action === 'delete'
+      ? `Deleted message from ${count} users' screens for code ${code.code}!`
+      : `Replaced link with OVER ❌ on ${count} users' screens for code ${code.code}!`
+  };
+}
+
 // Process an incoming Telegram update (from polling or webhook)
 async function processTelegramUpdate(update: any) {
   const token = db.config.botToken;
   if (!token) return;
 
   try {
+    // 0. Handle Join Requests from Bot Approval Links (creates_join_request)
+    if (update.chat_join_request) {
+      const cjr = update.chat_join_request;
+      const user = cjr.from;
+      const chat = cjr.chat;
+
+      // Auto-approve user join request using Telegram API
+      await callTelegramApi(token, 'approveChatJoinRequest', {
+        chat_id: chat.id,
+        user_id: user.id
+      });
+
+      let botUser = db.users.find((u) => u.telegramId === String(user.id));
+      if (!botUser) {
+        botUser = {
+          telegramId: String(user.id),
+          username: user.username || '',
+          firstName: user.first_name || 'User',
+          isVerified: false,
+          joinedChannels: [],
+          joinedAt: new Date().toISOString(),
+          lastActiveAt: new Date().toISOString(),
+          hasLeftRequired: false,
+          leftChannelsAlertCount: 0,
+          referralCode: `ref_${user.id}`,
+          referralCount: 0,
+          bonusBalance: 0,
+          claimedCodes: []
+        };
+        db.users.push(botUser);
+      }
+
+      const matchedChannel = db.channels.find(
+        (c) => c.channelId.toLowerCase() === `@${chat.username?.toLowerCase()}` || c.channelId === String(chat.id)
+      );
+      if (matchedChannel && !botUser.joinedChannels.includes(matchedChannel.id)) {
+        botUser.joinedChannels.push(matchedChannel.id);
+      }
+
+      saveDatabase();
+
+      db.logs.unshift({
+        id: `log-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        type: 'join',
+        user: `${user.first_name} (${user.id})`,
+        details: `Auto-approved join request for ${chat.title || chat.username || chat.id} created by bot approval link!`
+      });
+
+      try {
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: user.id,
+          text: `🎉 *JOIN REQUEST APPROVED!*\n\nYour request to join *${chat.title || 'Official Channel'}* has been automatically approved!\n\nPlease return to the bot and press 🔵 CHECK JOIN to verify and claim your access.`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: db.config.checkJoinButtonText || '🔵 CHECK JOIN', callback_data: 'check_in', style: 'primary' }]
+            ]
+          }
+        });
+      } catch {
+        // user might not have started bot
+      }
+    }
+
     // 1. Handle Leave/Join Events via chat_member updates
     if (update.chat_member) {
       const cm = update.chat_member;
@@ -588,12 +997,122 @@ async function processTelegramUpdate(update: any) {
             reply_markup: {
               inline_keyboard: [
                 [{ text: '📊 Live Bot Stats', callback_data: 'adm_stats', style: 'primary' }, { text: '📢 Channels List', callback_data: 'adm_channels', style: 'primary' }],
+                [{ text: '👥 Groups-Wise Audience', callback_data: 'adm_groupswise', style: 'primary' }, { text: '🔗 Invite & Exclusive Link', callback_data: 'adm_links', style: 'primary' }],
                 [{ text: '✏️ Edit Force Text', callback_data: 'adm_edit_force', style: 'primary' }, { text: '⚠️ Edit Leave Alert', callback_data: 'adm_edit_leave', style: 'danger' }],
                 [{ text: '🔘 Button Labels & Colors', callback_data: 'adm_edit_btns', style: 'primary' }, { text: '🎁 Verification Post', callback_data: 'adm_post', style: 'primary' }],
                 [{ text: '🔑 Claim Codes Manager', callback_data: 'adm_codes', style: 'primary' }, { text: '⚡ Instant Broadcast', callback_data: 'adm_bcast', style: 'primary' }],
-                [{ text: '💾 Database Vault (Group Backup)', callback_data: 'adm_db', style: 'primary' }, { text: '💎 Bonus Rewards', callback_data: 'adm_bonus', style: 'primary' }],
-                [{ text: '👥 Admins & Users', callback_data: 'adm_admins', style: 'primary' }, { text: '🚀 24/7 Hosting Status', callback_data: 'adm_host', style: 'primary' }]
+                [{ text: '💾 Database Vault (Backup)', callback_data: 'adm_db', style: 'primary' }, { text: '🧹 Clear Old Data', callback_data: 'adm_cleardata', style: 'danger' }],
+                [{ text: '💎 Bonus Rewards', callback_data: 'adm_bonus', style: 'primary' }, { text: '🚀 24/7 Hosting Status', callback_data: 'adm_host', style: 'primary' }]
               ]
+            }
+          });
+          return;
+        }
+
+        // 1.1 Links & Exclusive Content
+        if (data === 'adm_links') {
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `🔗 *INVITE & EXCLUSIVE LINK CONFIGURATION*\n\n` +
+              `🎁 *Invite & Earn Button:*\n` +
+              `• Label: \`${db.config.inviteButtonText || '🎁 Invite & Earn'}\`\n` +
+              `• Custom Link: \`${db.config.inviteCustomLink || 'Auto (Bot Referral Link)'}\`\n` +
+              `• Share Message: "${db.config.inviteShareMessage || 'Join and earn bonus!'}"\n\n` +
+              `🔓 *Exclusive VIP Content:*\n` +
+              `• Label: \`${db.config.exclusiveContentButtonText || '🔓 View Exclusive Content'}\`\n` +
+              `• Target URL: \`${db.config.exclusiveContentUrl || 'Not Configured'}\`\n\n` +
+              `💡 *Telegram Update Commands:*\n` +
+              `• \`/setexclusivelink <URL>\` - Update exclusive content link\n` +
+              `• \`/setinvitetext <Label>\` - Update Invite button label\n` +
+              `• \`/setexclusivetext <Label>\` - Update Exclusive button label`,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🎁 Test Invite Share Link', callback_data: 'get_referral', style: 'primary' }],
+                [{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]
+              ]
+            }
+          });
+          return;
+        }
+
+        // 1.2 Clear Old Data
+        if (data === 'adm_cleardata') {
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `🧹 *DATABASE CLEANUP & PURGE MANAGER*\n\n` +
+              `Select what old data to clear:\n` +
+              `• Total Users: *${db.users.length}*\n` +
+              `• Unverified / Left: *${db.users.filter(u => !u.isVerified || u.hasLeftRequired).length}*\n` +
+              `• Audit Logs: *${db.logs.length}*\n` +
+              `• Past Broadcasts: *${db.broadcasts.length}*`,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🗑️ Clear Audit Logs (Keep 10)', callback_data: 'adm_do_clean_logs', style: 'primary' }],
+                [{ text: '👤 Clean Left / Unverified Users', callback_data: 'adm_do_clean_unverified', style: 'danger' }],
+                [{ text: '📢 Clear Old Broadcast Logs', callback_data: 'adm_do_clean_bcasts', style: 'primary' }],
+                [{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]
+              ]
+            }
+          });
+          return;
+        }
+
+        if (data === 'adm_do_clean_logs') {
+          const keepCount = 10;
+          const removed = Math.max(0, db.logs.length - keepCount);
+          db.logs = db.logs.slice(0, keepCount);
+          saveDatabase();
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `✅ *Audit Logs Cleaned!* Removed ${removed} old logs. (Kept ${db.logs.length} latest)`,
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [[{ text: '🔙 Back to Cleanup', callback_data: 'adm_cleardata' }]] }
+          });
+          return;
+        }
+
+        if (data === 'adm_do_clean_unverified') {
+          const before = db.users.length;
+          db.users = db.users.filter((u) => u.isVerified && !u.hasLeftRequired);
+          const removed = before - db.users.length;
+          saveDatabase();
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `✅ *Unverified Users Purged!* Removed ${removed} inactive/left users. Remaining active verified users: *${db.users.length}*`,
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [[{ text: '🔙 Back to Cleanup', callback_data: 'adm_cleardata' }]] }
+          });
+          return;
+        }
+
+        if (data === 'adm_do_clean_bcasts') {
+          const count = db.broadcasts.length;
+          db.broadcasts = [];
+          saveDatabase();
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `✅ *Broadcast Logs Cleaned!* Removed ${count} past broadcast records.`,
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [[{ text: '🔙 Back to Cleanup', callback_data: 'adm_cleardata' }]] }
+          });
+          return;
+        }
+
+        // 1.3 Groups-wise Audience Breakdown
+        if (data === 'adm_groupswise') {
+          const report = db.channels.map((ch, idx) => {
+            const joined = db.users.filter((u) => u.joinedChannels.includes(ch.id)).length;
+            return `${idx + 1}. *${ch.title}* (${ch.type.toUpperCase()})\n   ID: \`${ch.channelId}\`\n   Admin: *${ch.isBotAdmin ? '✅ YES' : '⚠️ NO'}*\n   Active Bot Members: *${joined}*\n   Approval Link: *${ch.isApprovalLink ? 'YES (Auto)' : 'NO'}*`;
+          }).join('\n\n');
+
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `👥 *GROUPS & CHANNELS AUDIENCE BREAKDOWN*\n\n${report || 'No channels added yet.'}\n\n💡 Full member lists and filters are available in the Web Dashboard under "👥 Groups-Wise View".`,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [[{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]]
             }
           });
           return;
@@ -1255,16 +1774,35 @@ async function processTelegramUpdate(update: any) {
           details: 'Real Telegram verification passed! Delivered verification post.'
         });
 
-        // Deliver admin-configured post (WITHOUT clutter or invite buttons)
+        // Deliver admin-configured post with exclusive link and invite & earn button
         const buttons: any[] = [];
         const actionRow: any[] = [];
+        
+        // Exclusive VIP link button (Configurable)
+        if (db.config.exclusiveContentUrl) {
+          actionRow.push({
+            text: db.config.exclusiveContentButtonText || '🔓 View Exclusive Content',
+            url: db.config.exclusiveContentUrl,
+            style: 'success'
+          });
+        }
+
         if (db.verificationPost.buttonText && db.verificationPost.buttonUrl) {
           actionRow.push({ text: db.verificationPost.buttonText, url: db.verificationPost.buttonUrl, style: 'primary' });
         }
-        if (db.verificationPost.secondaryButtonText && db.verificationPost.secondaryButtonUrl) {
-          actionRow.push({ text: db.verificationPost.secondaryButtonText, url: db.verificationPost.secondaryButtonUrl, style: 'primary' });
-        }
         if (actionRow.length > 0) buttons.push(actionRow);
+
+        const secondaryRow: any[] = [];
+        if (db.verificationPost.secondaryButtonText && db.verificationPost.secondaryButtonUrl) {
+          secondaryRow.push({ text: db.verificationPost.secondaryButtonText, url: db.verificationPost.secondaryButtonUrl, style: 'primary' });
+        }
+        // Invite & Earn button
+        secondaryRow.push({
+          text: db.config.inviteButtonText || '🎁 Invite & Earn',
+          callback_data: 'get_referral',
+          style: 'primary'
+        });
+        buttons.push(secondaryRow);
 
         if (db.config.showBonusButton) {
           buttons.push([{
@@ -1290,6 +1828,57 @@ async function processTelegramUpdate(update: any) {
             reply_markup: buttons.length > 0 ? { inline_keyboard: buttons } : undefined
           });
         }
+        return;
+      }
+
+      if (data === 'get_referral') {
+        const botUsername = db.config.botUsername || 'PrimeForceJoinBot';
+        const refLink = `https://t.me/${botUsername}?start=${botUser.referralCode}`;
+        const shareText = encodeURIComponent(db.config.inviteShareMessage || '🔥 Join this bot, verify in channels, and unlock VIP access & bonuses!');
+        const shareUrl = db.config.inviteCustomLink
+          ? db.config.inviteCustomLink.replace('{bot_ref_link}', refLink)
+          : `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${shareText}`;
+
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: `🎁 *INVITE & EARN REWARDS*\n\n` +
+            `Invite friends and earn *+${db.config.referralBonusAmount} Points* for each verified join!\n\n` +
+            `🔗 *Your Personal Referral Link:*\n\`${refLink}\`\n\n` +
+            `📊 *Your Stats:*\n` +
+            `• Friends Invited: *${botUser.referralCount} Users*\n` +
+            `• Referral Bonus: *${botUser.referralCount * db.config.referralBonusAmount} Points*\n` +
+            `• Current Balance: *${botUser.bonusBalance} Points*`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: db.config.inviteButtonText || '🎁 Share With Friends', url: shareUrl, style: 'primary' }],
+              [{ text: '🔴 CLAIM BONUS', callback_data: 'claim_bonus', style: 'danger' }]
+            ]
+          }
+        });
+        return;
+      }
+
+      if (data === 'view_exclusive') {
+        if (!botUser.isVerified || botUser.hasLeftRequired) {
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `🔒 *EXCLUSIVE ACCESS LOCKED!*\n\nPlease join all required channels and press 🔵 CHECK JOIN first.\n\n${db.config.leaveAlertMessage}`
+          });
+          return;
+        }
+
+        const exclusiveUrl = db.config.exclusiveContentUrl || 'https://t.me';
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: `🔓 *EXCLUSIVE VIP ACCESS UNLOCKED!*\n\nClick the button below to access your exclusive content:`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: db.config.exclusiveContentButtonText || '🔓 Open Exclusive VIP', url: exclusiveUrl, style: 'success' }]
+            ]
+          }
+        });
         return;
       }
 
@@ -1477,70 +2066,436 @@ async function processTelegramUpdate(update: any) {
         }
       }
 
-      // Handle Admin /addchannel <@channelId> <Title> <InviteLink>
-      if (text.startsWith('/addchannel') && isAdmin) {
-        const parts = text.split(' ');
-        if (parts.length >= 4) {
-          const chId = parts[1];
-          const chTitle = parts[2];
-          const chLink = parts[3];
-
-          db.channels.push({
-            id: `ch-${Date.now()}`,
-            channelId: chId,
-            title: chTitle,
-            inviteLink: chLink,
-            type: 'channel',
-            required: true,
-            addedAt: new Date().toISOString()
-          });
+      // Handle Admin /setexclusivelink <url>
+      if (text.startsWith('/setexclusivelink') && isAdmin) {
+        const newUrl = text.replace('/setexclusivelink', '').trim();
+        if (newUrl) {
+          db.config.exclusiveContentUrl = newUrl;
           saveDatabase();
-
           await callTelegramApi(token, 'sendMessage', {
             chat_id: chatId,
-            text: `✅ *Force Join Channel Added via Telegram!*\n\nTitle: *${chTitle}*\nID: \`${chId}\`\nLink: ${chLink}`,
-            parse_mode: 'Markdown'
-          });
-          return;
-        } else {
-          await callTelegramApi(token, 'sendMessage', {
-            chat_id: chatId,
-            text: `⚠️ *Usage:* \`/addchannel <@channelId> <Title> <InviteLink>\``,
+            text: `✅ *Exclusive VIP Content Link Updated!*\n\nNew URL: \`${newUrl}\``,
             parse_mode: 'Markdown'
           });
           return;
         }
       }
 
-      // Handle Admin /broadcast <text>
-      if (text.startsWith('/broadcast') && isAdmin) {
-        const bcastMsg = text.replace('/broadcast', '').trim();
-        if (!bcastMsg) {
+      // Handle Admin /setinvitetext <text>
+      if (text.startsWith('/setinvitetext') && isAdmin) {
+        const newText = text.replace('/setinvitetext', '').trim();
+        if (newText) {
+          db.config.inviteButtonText = newText;
+          saveDatabase();
           await callTelegramApi(token, 'sendMessage', {
             chat_id: chatId,
-            text: `⚠️ *Usage:* \`/broadcast <Your message here>\``,
+            text: `✅ *Invite Button Label updated to:* \`${newText}\``,
+            parse_mode: 'Markdown'
+          });
+          return;
+        }
+      }
+
+      // Handle Admin /setexclusivetext <text>
+      if (text.startsWith('/setexclusivetext') && isAdmin) {
+        const newText = text.replace('/setexclusivetext', '').trim();
+        if (newText) {
+          db.config.exclusiveContentButtonText = newText;
+          saveDatabase();
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `✅ *Exclusive Button Label updated to:* \`${newText}\``,
+            parse_mode: 'Markdown'
+          });
+          return;
+        }
+      }
+
+      // Handle Admin /addchannel <@channelId> <Title> [InviteLink]
+      if (text.startsWith('/addchannel') && isAdmin) {
+        const parts = text.split(' ');
+        if (parts.length >= 3) {
+          const chId = parts[1];
+          const chTitle = parts[2];
+          let chLink = parts[3] || '';
+
+          // 1. Check if bot is Admin in channel
+          const adminCheck = await checkBotIsAdminInChat(token, chId);
+
+          // 2. If no link or 'auto' or 'approval' specified, auto-generate Approval Link!
+          let isApproval = false;
+          if (!chLink || chLink.toLowerCase() === 'auto' || chLink.toLowerCase() === 'approval') {
+            const linkRes = await createChatApprovalInviteLink(token, chId, `${chTitle} Approval Link`);
+            if (linkRes.ok && linkRes.invite_link) {
+              chLink = linkRes.invite_link;
+              isApproval = true;
+            } else {
+              chLink = `https://t.me/${chId.replace('@', '')}`;
+            }
+          }
+
+          const newChan: ForceJoinChannel = {
+            id: `ch-${Date.now()}`,
+            channelId: chId,
+            title: chTitle,
+            inviteLink: chLink,
+            type: chId.startsWith('-100') ? 'group' : 'channel',
+            required: true,
+            isBotAdmin: adminCheck.isAdmin,
+            adminCheckStatus: adminCheck.isAdmin ? 'verified' : 'not_admin',
+            isApprovalLink: isApproval,
+            addedAt: new Date().toISOString()
+          };
+
+          db.channels.push(newChan);
+          saveDatabase();
+
+          let adminNotice = adminCheck.isAdmin
+            ? '✅ *Bot Admin Status:* Verified Administrator'
+            : `⚠️ *WARNING: BOT IS NOT ADMIN!*\nPlease promote @${db.config.botUsername || 'Bot'} to Administrator in \`${chId}\` with "Invite Users via Link" rights, otherwise membership check will fail!`;
+
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `📢 *FORCE JOIN CHANNEL ADDED!*\n\n` +
+              `• Title: *${chTitle}*\n` +
+              `• ID: \`${chId}\`\n` +
+              `• Invite Link: ${chLink} ${isApproval ? '*(Bot Approval Link)*' : ''}\n\n` +
+              `${adminNotice}`,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [[{ text: '📢 View Channels List', callback_data: 'adm_channels' }]]
+            }
+          });
+          return;
+        } else {
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `⚠️ *Usage:* \`/addchannel <@channelId> <Title> [InviteLink_or_auto]\`\n\n💡 If you write \`auto\`, bot will automatically create an admin approval link!`,
+            parse_mode: 'Markdown'
+          });
+          return;
+        }
+      }
+
+      // Handle Workable Admin /broadcast, /bc, /broadcast_all, /broadcast_verified, /broadcast_unverified, /broadcast_groups
+      if ((text.startsWith('/broadcast') || text.startsWith('/bc')) && isAdmin) {
+        let targetType: 'verified_only' | 'all' | 'unverified_only' | 'groups' = 'verified_only';
+        let bcastMsg = '';
+
+        if (text.startsWith('/broadcast_all') || text.startsWith('/bc_all')) {
+          targetType = 'all';
+          bcastMsg = text.replace(/^\/(broadcast_all|bc_all)/, '').trim();
+        } else if (text.startsWith('/broadcast_unverified') || text.startsWith('/bc_unverified')) {
+          targetType = 'unverified_only';
+          bcastMsg = text.replace(/^\/(broadcast_unverified|bc_unverified)/, '').trim();
+        } else if (text.startsWith('/broadcast_groups') || text.startsWith('/bc_groups')) {
+          targetType = 'groups';
+          bcastMsg = text.replace(/^\/(broadcast_groups|bc_groups)/, '').trim();
+        } else if (text.startsWith('/broadcast_verified') || text.startsWith('/bc_verified')) {
+          targetType = 'verified_only';
+          bcastMsg = text.replace(/^\/(broadcast_verified|bc_verified)/, '').trim();
+        } else {
+          bcastMsg = text.replace(/^\/(broadcast|bc)/, '').trim();
+        }
+
+        const isReply = Boolean(msg.reply_to_message);
+
+        // If neither text nor replied message, show guidance menu with 1-click test button
+        if (!bcastMsg && !isReply) {
+          const verifiedCount = db.users.filter((u) => u.isVerified && !u.hasLeftRequired).length;
+          const unverifiedCount = db.users.length - verifiedCount;
+          const groupCount = db.channels.filter((c) => c.type === 'group').length;
+
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `⚡ *TELEFORCE WORKABLE BROADCASTING ENGINE*\n\n` +
+              `📊 *Audience Overview:*\n` +
+              `• Verified Users: *${verifiedCount}*\n` +
+              `• Unverified / Left: *${unverifiedCount}*\n` +
+              `• Total Users: *${db.users.length}*\n` +
+              `• Discussion Groups: *${groupCount}*\n\n` +
+              `💡 *How to Broadcast:*\n` +
+              `1️⃣ *Reply Broadcast (Best for Media/Buttons):* Send any photo, text, or post in this chat, then **Reply** to it with \`/bc\` or \`/broadcast\`!\n` +
+              `2️⃣ *Direct Text Broadcast:* \`/bc <Your Message>\` (Sends to *Verified* users)\n` +
+              `3️⃣ *All Users:* \`/bc_all <Your Message>\`\n` +
+              `4️⃣ *Unverified Users:* \`/bc_unverified <Your Message>\`\n` +
+              `5️⃣ *All Groups:* \`/bc_groups <Your Message>\``,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: `📢 Test Broadcast to Verified (${verifiedCount})`, callback_data: 'adm_send_test_bcast', style: 'primary' }],
+                [{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]
+              ]
+            }
+          });
+          return;
+        }
+
+        if (targetType === 'groups') {
+          // Broadcast to all configured Telegram groups
+          const targetGroups = db.channels.filter((c) => c.type === 'group');
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `⏳ *Broadcasting to ${targetGroups.length} Groups...*`,
+            parse_mode: 'Markdown'
+          });
+
+          let groupSent = 0;
+          for (const grp of targetGroups) {
+            try {
+              if (isReply && msg.reply_to_message) {
+                await callTelegramApi(token, 'copyMessage', {
+                  chat_id: grp.channelId,
+                  from_chat_id: msg.chat.id,
+                  message_id: msg.reply_to_message.message_id
+                });
+                groupSent++;
+              } else {
+                await callTelegramApi(token, 'sendMessage', {
+                  chat_id: grp.channelId,
+                  text: bcastMsg,
+                  parse_mode: 'Markdown'
+                });
+                groupSent++;
+              }
+            } catch (e) {
+              // Ignore group send errors
+            }
+            await new Promise((r) => setTimeout(r, 40));
+          }
+
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `✅ *GROUP BROADCAST COMPLETE!*\n\nDelivered to *${groupSent} / ${targetGroups.length}* groups.`,
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [[{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]] }
+          });
+          return;
+        }
+
+        const eligibleRecipients = db.users.filter((u) => {
+          if (targetType === 'verified_only') return u.isVerified && !u.hasLeftRequired;
+          if (targetType === 'unverified_only') return !u.isVerified || u.hasLeftRequired;
+          return true;
+        });
+
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: `⏳ *Broadcasting started!* Delivering to *${eligibleRecipients.length}* users (${targetType}). Please wait...`,
+          parse_mode: 'Markdown'
+        });
+
+        let dispatchResult: { sent: number; failed: number };
+
+        if (isReply && msg.reply_to_message) {
+          // Copy exact message (photo, media, buttons, caption)
+          dispatchResult = await dispatchCopyBroadcastToUsers(token, eligibleRecipients, msg.chat.id, msg.reply_to_message.message_id);
+        } else {
+          // Text broadcast
+          dispatchResult = await dispatchBroadcastToUsers(token, eligibleRecipients, { text: bcastMsg });
+        }
+
+        // Save in broadcasts history
+        const bcastEntry: BroadcastMessage = {
+          id: `bc-${Date.now()}`,
+          title: isReply ? 'Reply Copy Broadcast' : `Broadcast: "${bcastMsg.slice(0, 32)}..."`,
+          type: 'instant',
+          postContent: { text: bcastMsg || 'Copy message broadcast', mediaType: 'none' },
+          targetAudience: targetType,
+          status: 'sent',
+          sentCount: dispatchResult.sent,
+          totalRecipients: eligibleRecipients.length,
+          createdAt: new Date().toISOString(),
+          executedAt: new Date().toISOString()
+        };
+        db.broadcasts.unshift(bcastEntry);
+        saveDatabase();
+
+        db.logs.unshift({
+          id: `log-${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          type: 'broadcast',
+          user: `${fromUser.first_name} (${fromUser.id})`,
+          details: `Dispatched broadcast to ${dispatchResult.sent} users (${dispatchResult.failed} failed/blocked).`
+        });
+
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: `✅ *BROADCAST DELIVERED SUCCESSFULLY!*\n\n` +
+            `• Target Audience: *${targetType}*\n` +
+            `• Delivered: *${dispatchResult.sent} users*\n` +
+            `• Failed / Blocked: *${dispatchResult.failed} users*\n` +
+            `• Time IST: \`${getISTDateString()}\``,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]]
+          }
+        });
+        return;
+      }
+
+      // Handle Admin /groups command (groups wise report)
+      if ((text === '/groups' || text === '/groupswise') && isAdmin) {
+        const report = db.channels.map((ch, idx) => {
+          const joined = db.users.filter((u) => u.joinedChannels.includes(ch.id)).length;
+          return `${idx + 1}. *${ch.title}* (${ch.type.toUpperCase()})\n   ID: \`${ch.channelId}\`\n   Admin Status: *${ch.isBotAdmin ? '✅ Admin Verified' : '⚠️ NOT ADMIN'}*\n   Active Members: *${joined}*\n   Approval Link: *${ch.isApprovalLink ? 'YES (Auto)' : 'NO'}*\n   Link: ${ch.inviteLink}`;
+        }).join('\n\n');
+
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: `👥 *GROUPS & CHANNELS AUDIENCE BREAKDOWN*\n\n${report || 'No channels or groups configured.'}\n\n💡 Full member breakdown and group-wise broadcast options are available in Web Dashboard!`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '📢 Broadcast to Groups', callback_data: 'adm_bcast', style: 'primary' }],
+              [{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]
+            ]
+          }
+        });
+        return;
+      }
+
+      // Handle Admin /setinvitelink <url>
+      if (text.startsWith('/setinvitelink') && isAdmin) {
+        const newUrl = text.replace('/setinvitelink', '').trim();
+        db.config.inviteCustomLink = newUrl;
+        saveDatabase();
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: `✅ *Invite & Earn Custom Link Updated!*\n\n${newUrl ? `Custom Link: \`${newUrl}\`` : 'Reset to default bot referral link generator.'}`,
+          parse_mode: 'Markdown'
+        });
+        return;
+      }
+
+      // Handle Admin /setinvitemsg <text>
+      if (text.startsWith('/setinvitemsg') && isAdmin) {
+        const newMsg = text.replace('/setinvitemsg', '').trim();
+        if (newMsg) {
+          db.config.inviteShareMessage = newMsg;
+          saveDatabase();
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `✅ *Invite Share Message Updated!*\n\nNew Text: "${newMsg}"`,
+            parse_mode: 'Markdown'
+          });
+          return;
+        }
+      }
+
+      // Handle Admin /genlink <channelId> (Bot creates approval link)
+      if (text.startsWith('/genlink') && isAdmin) {
+        const chQuery = text.replace('/genlink', '').trim();
+        const ch = db.channels.find((c) => c.channelId.toLowerCase() === chQuery.toLowerCase() || c.id === chQuery);
+        if (!ch) {
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `⚠️ *Channel not found.* Usage: \`/genlink <@channelId>\``,
             parse_mode: 'Markdown'
           });
           return;
         }
 
-        const verifiedUsers = db.users.filter((u) => u.isVerified && !u.hasLeftRequired);
-        for (const u of verifiedUsers) {
-          try {
-            await callTelegramApi(token, 'sendMessage', {
-              chat_id: u.telegramId,
-              text: bcastMsg,
-              parse_mode: 'Markdown'
-            });
-          } catch (e) {
-            // ignore
-          }
+        const linkRes = await createChatApprovalInviteLink(token, ch.channelId, `${ch.title} Auto Approval`);
+        if (linkRes.ok && linkRes.invite_link) {
+          ch.inviteLink = linkRes.invite_link;
+          ch.isApprovalLink = true;
+          ch.isBotAdmin = true;
+          saveDatabase();
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `✨ *BOT APPROVAL LINK CREATED!*\n\n• Channel: *${ch.title}*\n• Approval Link: \`${linkRes.invite_link}\`\n\nUsers joining via this link will be automatically approved and tracked!`,
+            parse_mode: 'Markdown'
+          });
+        } else {
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `❌ *Could Not Create Approval Link:*\n${linkRes.error}\n\nMake sure @${db.config.botUsername || 'Bot'} is an Administrator in \`${ch.channelId}\` with "Invite Users via Link" rights!`,
+            parse_mode: 'Markdown'
+          });
         }
+        return;
+      }
+
+      // Handle Admin /cleardata
+      if (text.startsWith('/cleardata') && isAdmin) {
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: `🧹 *TELEFORCE DATABASE CLEANUP*\n\nChoose what old data to clear:`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🗑️ Clear Audit Logs (Keep 10)', callback_data: 'adm_do_clean_logs', style: 'primary' }],
+              [{ text: '👤 Purge Left / Unverified Users', callback_data: 'adm_do_clean_unverified', style: 'danger' }],
+              [{ text: '📢 Clear Old Broadcast Logs', callback_data: 'adm_do_clean_bcasts', style: 'primary' }],
+              [{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]
+            ]
+          }
+        });
+        return;
+      }
+
+      // Handle User /invite & /referral
+      if (text === '/invite' || text === '/referral') {
+        const botUsername = db.config.botUsername || 'PrimeForceJoinBot';
+        const refLink = `https://t.me/${botUsername}?start=${botUser.referralCode}`;
+        const shareText = encodeURIComponent(db.config.inviteShareMessage || '🔥 Join this bot, verify in channels, and unlock VIP access & bonuses!');
+        const shareUrl = db.config.inviteCustomLink
+          ? db.config.inviteCustomLink.replace('{bot_ref_link}', refLink)
+          : `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${shareText}`;
 
         await callTelegramApi(token, 'sendMessage', {
           chat_id: chatId,
-          text: `⚡ *Broadcast Delivered to ${verifiedUsers.length} verified users!*`,
-          parse_mode: 'Markdown'
+          text: `🎁 *INVITE & EARN REWARDS*\n\n` +
+            `Invite friends and earn *+${db.config.referralBonusAmount} Points* for each verified join!\n\n` +
+            `🔗 *Your Personal Referral Link:*\n\`${refLink}\`\n\n` +
+            `📊 *Your Stats:*\n` +
+            `• Friends Invited: *${botUser.referralCount} Users*\n` +
+            `• Referral Bonus: *${botUser.referralCount * db.config.referralBonusAmount} Points*\n` +
+            `• Current Balance: *${botUser.bonusBalance} Points*`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: db.config.inviteButtonText || '🎁 Share With Friends', url: shareUrl, style: 'primary' }],
+              [{ text: '🔴 CLAIM BONUS', callback_data: 'claim_bonus', style: 'danger' }]
+            ]
+          }
+        });
+        return;
+      }
+
+      // Handle User /exclusive & /vip
+      if (text === '/exclusive' || text === '/vip') {
+        if (!botUser.isVerified || botUser.hasLeftRequired) {
+          const checkBtns: any[] = db.channels.map((c) => [{
+            text: db.config.joinButtonText || '🔵 JOIN NOW',
+            url: c.inviteLink,
+            style: getTelegramButtonStyle(db.config.joinButtonColor, 'primary')
+          }]);
+          checkBtns.push([{
+            text: db.config.checkJoinButtonText || '🔵 CHECK JOIN',
+            callback_data: 'check_in',
+            style: getTelegramButtonStyle(db.config.checkButtonColor, 'primary')
+          }]);
+
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `🔒 *EXCLUSIVE ACCESS LOCKED!*\n\nPlease join all required channels and verify first to view exclusive content.\n\n${db.config.leaveAlertMessage}`,
+            reply_markup: { inline_keyboard: checkBtns }
+          });
+          return;
+        }
+
+        const exclusiveUrl = db.config.exclusiveContentUrl || 'https://t.me';
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: `🔓 *EXCLUSIVE VIP CONTENT UNLOCKED!*\n\nCongratulations! Here is your exclusive VIP access link:`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: db.config.exclusiveContentButtonText || '🔓 View Exclusive Content', url: exclusiveUrl, style: 'success' }]
+            ]
+          }
         });
         return;
       }
@@ -1737,9 +2692,37 @@ async function processTelegramUpdate(update: any) {
         return;
       }
 
-      // Handle Admin /restore (or recovering data on bot change)
-      if (text.startsWith('/restore') && isAdmin) {
+      // Handle Admin /restore or /recover (recovering database on bot crash / migration using Group ID)
+      if ((text.startsWith('/restore') || text.startsWith('/recover')) && isAdmin) {
+        const queryGroupId = text.replace(/^\/(restore|recover)/, '').trim();
         const replyDoc = msg.reply_to_message?.document;
+
+        // 1. Direct Group ID recovery (e.g. /restore -1002938172654 or /recover -1002938172654)
+        if (queryGroupId) {
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `⏳ *Connecting to Database Group:* \`${queryGroupId}\`\nFetching latest pinned backup document...`,
+            parse_mode: 'Markdown'
+          });
+
+          const recRes = await restoreDatabaseFromTelegramGroup(queryGroupId);
+          if (recRes.ok) {
+            await callTelegramApi(token, 'sendMessage', {
+              chat_id: chatId,
+              text: `🎉 *DATABASE RESTORED SUCCESSFULLY FROM GROUP!*\n\n• Group ID: \`${queryGroupId}\`\n• Recovered Users: *${db.users.length}*\n• Recovered Channels: *${db.channels.length}*\n• Recovered Codes: *${db.claimCodes.length}*\n• Time IST: \`${getISTDateString()}\`\n\nAll bot channels, user verifications, and claim codes have been restored!`,
+              parse_mode: 'Markdown'
+            });
+          } else {
+            await callTelegramApi(token, 'sendMessage', {
+              chat_id: chatId,
+              text: `❌ *Restore Failed:*\n${recRes.error}\n\n💡 Ensure the bot is an Admin in group \`${queryGroupId}\` and that a backup document was pinned in that group.`,
+              parse_mode: 'Markdown'
+            });
+          }
+          return;
+        }
+
+        // 2. Recovery by Replying /restore to a .json backup file
         if (replyDoc && replyDoc.file_name?.endsWith('.json')) {
           await callTelegramApi(token, 'sendMessage', {
             chat_id: chatId,
@@ -1756,10 +2739,10 @@ async function processTelegramUpdate(update: any) {
               const parsedDb = JSON.parse(downloadedJson);
 
               if (parsedDb && (parsedDb.users || parsedDb.channels || parsedDb.config)) {
-                db.channels = parsedDb.channels || db.channels;
-                db.claimCodes = parsedDb.claimCodes || db.claimCodes;
-                db.users = parsedDb.users || db.users;
-                db.config = { ...db.config, ...parsedDb.config };
+                if (parsedDb.channels) db.channels = parsedDb.channels;
+                if (parsedDb.claimCodes) db.claimCodes = parsedDb.claimCodes;
+                if (parsedDb.users) db.users = parsedDb.users;
+                if (parsedDb.config) db.config = { ...db.config, ...parsedDb.config };
                 if (parsedDb.verificationPost) db.verificationPost = parsedDb.verificationPost;
                 if (parsedDb.admins) db.admins = parsedDb.admins;
                 saveDatabase(true);
@@ -1790,16 +2773,32 @@ async function processTelegramUpdate(update: any) {
           }
         }
 
-        // Guidance on recovery
+        // 3. If backupGroupId is already saved in config, offer 1-click restore
+        if (db.config.backupGroupId) {
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `🔄 *DATABASE RECOVERY OPTIONS*\n\n` +
+              `Configured Vault Group: \`${db.config.backupGroupId}\`\n\n` +
+              `Choose recovery method below, or send \`/recover <GroupID>\`:`,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: `🔄 Restore From Group (${db.config.backupGroupId})`, callback_data: 'adm_dobackup_restore', style: 'primary' }],
+                [{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]
+              ]
+            }
+          });
+          return;
+        }
+
+        // 4. Guidance on recovery
         await callTelegramApi(token, 'sendMessage', {
           chat_id: chatId,
-          text: `🔄 *DATABASE RESTORE & RECOVERY GUIDE*\n\n` +
-            `Jab aap bot change karein ya data recover karna ho:\n\n` +
-            `1️⃣ Apne Database Backup Telegram Group me jayein: \`${db.config.backupGroupId || 'Set via /setbackupgroup'}\`\n` +
-            `2️⃣ Kisi bhi \`teleforce_db_backup_*.json\` file ko dhundhein.\n` +
-            `3️⃣ Us message par **Reply** karein aur likhein: \`/restore\`\n\n` +
-            `Bot turant us JSON backup ko download karke pura database (users, channels, codes) restore kar dega!\n\n` +
-            `_Aap Web Admin Dashboard ke "Telegram DB & Backup" tab se bhi backup upload karke restore kar sakte hain._`,
+          text: `🔄 *DATABASE RESTORE & CRASH RECOVERY GUIDE*\n\n` +
+            `Jab bot crash kare ya server change ho, aap database group ka ID dekar data restore kar sakte hain:\n\n` +
+            `👉 \`/recover <GroupID>\` (e.g. \`/recover -1002938172654\`)\n` +
+            `👉 Ya group me kisi \`teleforce_db_backup_*.json\` message par **Reply** karein aur likhein: \`/restore\`\n\n` +
+            `Bot turant group ke pinned backup file se 100% users, channels, aur codes recover kar lega!`,
           parse_mode: 'Markdown'
         });
         return;
@@ -1863,6 +2862,52 @@ async function processTelegramUpdate(update: any) {
         return;
       }
 
+      // Handle Admin /over <code> or /expire <code> (1-click mark link as OVER on all users' screens)
+      if ((text.startsWith('/over') || text.startsWith('/expire')) && isAdmin) {
+        const targetCode = text.replace(/^\/(over|expire)/, '').trim();
+        if (!targetCode) {
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `⚠️ *Usage:* \`/over <CODE>\`\n\nExample: \`/over VIP2026\`\n(Yeh command sabhi users ke message me link ko replace karke *OVER ❌* likh dega!)`,
+            parse_mode: 'Markdown'
+          });
+          return;
+        }
+
+        const overRes = await markClaimCodeOver(targetCode, 'over');
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: overRes.success
+            ? `✅ *CODE MARKED OVER ❌!*\n\n${overRes.message}`
+            : `❌ *Error:* ${overRes.message}`,
+          parse_mode: 'Markdown'
+        });
+        return;
+      }
+
+      // Handle Admin /delmsg <code> or /delover <code> (Delete sent message from users' chats)
+      if ((text.startsWith('/delmsg') || text.startsWith('/delover')) && isAdmin) {
+        const targetCode = text.replace(/^\/(delmsg|delover)/, '').trim();
+        if (!targetCode) {
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `⚠️ *Usage:* \`/delmsg <CODE>\`\n\nExample: \`/delmsg VIP2026\`\n(Yeh command sabhi users ke phone se us code ka message delete kar dega!)`,
+            parse_mode: 'Markdown'
+          });
+          return;
+        }
+
+        const delRes = await markClaimCodeOver(targetCode, 'delete');
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: delRes.success
+            ? `🗑️ *SENT MESSAGES DELETED!*\n\n${delRes.message}`
+            : `❌ *Error:* ${delRes.message}`,
+          parse_mode: 'Markdown'
+        });
+        return;
+      }
+
       // Handle /claim <CODE> or entering code directly
       let codeQuery = text;
       if (codeQuery.startsWith('/claim')) {
@@ -1895,6 +2940,16 @@ async function processTelegramUpdate(update: any) {
           return;
         }
 
+        // Check if code has been marked as OVER ❌
+        if (matchedCode.isOver) {
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `❌ *THIS CODE IS OVER ❌*\n\nSorry, this claim code *${codeQuery}* is closed and the link is now *OVER ❌*.\nPlease stay tuned for new codes!`,
+            parse_mode: 'Markdown'
+          });
+          return;
+        }
+
         if (botUser.claimedCodes.includes(codeQuery)) {
           await callTelegramApi(token, 'sendMessage', {
             chat_id: chatId,
@@ -1913,13 +2968,39 @@ async function processTelegramUpdate(update: any) {
         if (matchedCode.postContent.buttonText && matchedCode.postContent.buttonUrl) {
           codeButtons.push([{ text: matchedCode.postContent.buttonText, url: matchedCode.postContent.buttonUrl, style: 'primary' }]);
         }
+        if (matchedCode.postContent.secondaryButtonText && matchedCode.postContent.secondaryButtonUrl) {
+          codeButtons.push([{ text: matchedCode.postContent.secondaryButtonText, url: matchedCode.postContent.secondaryButtonUrl, style: 'primary' }]);
+        }
 
-        await callTelegramApi(token, 'sendMessage', {
-          chat_id: chatId,
-          text: `🎉 *CODE UNLOCKED: ${matchedCode.code}*\n\n${matchedCode.postContent.text}`,
-          parse_mode: 'Markdown',
-          reply_markup: codeButtons.length > 0 ? { inline_keyboard: codeButtons } : undefined
-        });
+        let sentMsgRes: any;
+        if (matchedCode.postContent.mediaType === 'image' && matchedCode.postContent.mediaUrl) {
+          sentMsgRes = await callTelegramApi(token, 'sendPhoto', {
+            chat_id: chatId,
+            photo: matchedCode.postContent.mediaUrl,
+            caption: `🎉 *CODE UNLOCKED: ${matchedCode.code}*\n\n${matchedCode.postContent.text}`,
+            parse_mode: 'Markdown',
+            reply_markup: codeButtons.length > 0 ? { inline_keyboard: codeButtons } : undefined
+          });
+        } else {
+          sentMsgRes = await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `🎉 *CODE UNLOCKED: ${matchedCode.code}*\n\n${matchedCode.postContent.text}`,
+            parse_mode: 'Markdown',
+            reply_markup: codeButtons.length > 0 ? { inline_keyboard: codeButtons } : undefined
+          });
+        }
+
+        // Save delivery record to enable 1-click OVER ❌ and automatic timed link removal on user screens
+        if (sentMsgRes && sentMsgRes.ok && sentMsgRes.result?.message_id) {
+          if (!matchedCode.sentMessages) matchedCode.sentMessages = [];
+          matchedCode.sentMessages.push({
+            telegramId: String(fromUser.id),
+            chatId: chatId,
+            messageId: sentMsgRes.result.message_id,
+            deliveredAt: new Date().toISOString()
+          });
+          saveDatabase();
+        }
         return;
       }
 
@@ -2215,21 +3296,52 @@ app.get('/api/channels', (req: Request, res: Response) => {
   res.json(db.channels);
 });
 
-app.post('/api/channels', (req: Request, res: Response) => {
-  const { channelId, title, inviteLink, type, required, memberCount } = req.body;
-  if (!channelId || !title || !inviteLink) {
-    return res.status(400).json({ error: 'channelId, title and inviteLink are required.' });
+app.post('/api/channels', async (req: Request, res: Response) => {
+  const { channelId, title, inviteLink, type, required, memberCount, autoCreateApprovalLink } = req.body;
+  if (!channelId || !title) {
+    return res.status(400).json({ error: 'channelId and title are required.' });
+  }
+
+  const cleanChannelId = channelId.trim().startsWith('@') || channelId.trim().startsWith('-') ? channelId.trim() : `@${channelId.trim()}`;
+  let finalInviteLink = (inviteLink || '').trim();
+  let isApprovalLink = false;
+  let isBotAdmin = false;
+  let adminCheckStatus: 'verified' | 'not_admin' | 'error' | 'pending' = 'pending';
+
+  const token = db.config.botToken;
+
+  // 1. Verify if bot is Admin in this channel/group
+  if (token) {
+    const adminCheck = await checkBotIsAdminInChat(token, cleanChannelId);
+    isBotAdmin = adminCheck.isAdmin;
+    adminCheckStatus = adminCheck.isAdmin ? 'verified' : 'not_admin';
+
+    // 2. If user requested auto approval link or didn't supply one, let bot create it!
+    if (autoCreateApprovalLink || !finalInviteLink) {
+      const linkRes = await createChatApprovalInviteLink(token, cleanChannelId, `${title.trim()} Join Request`);
+      if (linkRes.ok && linkRes.invite_link) {
+        finalInviteLink = linkRes.invite_link;
+        isApprovalLink = true;
+      }
+    }
+  }
+
+  if (!finalInviteLink) {
+    finalInviteLink = `https://t.me/${cleanChannelId.replace('@', '')}`;
   }
 
   const newChannel: ForceJoinChannel = {
     id: `ch-${Date.now()}`,
-    channelId: channelId.trim().startsWith('@') || channelId.trim().startsWith('-') ? channelId.trim() : `@${channelId.trim()}`,
+    channelId: cleanChannelId,
     title: title.trim(),
-    inviteLink: inviteLink.trim(),
+    inviteLink: finalInviteLink,
     type: type === 'group' ? 'group' : 'channel',
     required: required !== undefined ? Boolean(required) : true,
     memberCount: memberCount ? parseInt(memberCount, 10) : Math.floor(Math.random() * 20000 + 5000),
-    addedAt: new Date().toISOString()
+    addedAt: new Date().toISOString(),
+    isBotAdmin,
+    adminCheckStatus,
+    isApprovalLink
   };
 
   db.channels.push(newChannel);
@@ -2240,10 +3352,180 @@ app.post('/api/channels', (req: Request, res: Response) => {
     timestamp: new Date().toISOString(),
     type: 'admin',
     user: 'Admin Panel',
-    details: `Added new force-join ${newChannel.type}: ${newChannel.title} (${newChannel.channelId})`
+    details: `Added new force-join ${newChannel.type}: ${newChannel.title} (${newChannel.channelId}). Admin: ${isBotAdmin ? 'YES' : 'NO'}, Approval Link: ${isApprovalLink ? 'YES' : 'NO'}`
   });
 
-  res.json({ success: true, channel: newChannel });
+  res.json({ success: true, channel: newChannel, isBotAdmin, isApprovalLink });
+});
+
+// Verify bot admin rights in channel
+app.post('/api/channels/:id/verify-admin', async (req: Request, res: Response) => {
+  const channel = db.channels.find((c) => c.id === req.params.id);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  const token = db.config.botToken;
+  if (!token) return res.status(400).json({ error: 'Bot token not configured' });
+
+  const check = await checkBotIsAdminInChat(token, channel.channelId);
+  channel.isBotAdmin = check.isAdmin;
+  channel.adminCheckStatus = check.isAdmin ? 'verified' : 'not_admin';
+  saveDatabase();
+
+  res.json({
+    success: true,
+    isAdmin: check.isAdmin,
+    status: check.status,
+    channel
+  });
+});
+
+// Generate bot approval link for channel
+app.post('/api/channels/:id/create-approval-link', async (req: Request, res: Response) => {
+  const channel = db.channels.find((c) => c.id === req.params.id);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  const token = db.config.botToken;
+  if (!token) return res.status(400).json({ error: 'Bot token not configured' });
+
+  const linkRes = await createChatApprovalInviteLink(token, channel.channelId, `${channel.title} Approval Link`);
+  if (linkRes.ok && linkRes.invite_link) {
+    channel.inviteLink = linkRes.invite_link;
+    channel.isApprovalLink = true;
+    channel.approvalLinkCreated = new Date().toISOString();
+    channel.isBotAdmin = true;
+    channel.adminCheckStatus = 'verified';
+    saveDatabase();
+
+    db.logs.unshift({
+      id: `log-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      type: 'admin',
+      user: 'Admin Panel',
+      details: `Generated Telegram Approval Link for ${channel.title}: ${linkRes.invite_link}`
+    });
+
+    return res.json({ success: true, inviteLink: linkRes.invite_link, channel });
+  }
+
+  res.status(400).json({ success: false, error: linkRes.error || 'Failed to create approval link. Ensure bot is Admin in channel!' });
+});
+
+// Groups-wise Audience Breakdown Endpoint
+app.get('/api/groups-wise-stats', (req: Request, res: Response) => {
+  const groupsData = db.channels.map((ch) => {
+    const joinedUsers = db.users.filter((u) => u.joinedChannels.includes(ch.id));
+    const verifiedUsers = joinedUsers.filter((u) => u.isVerified && !u.hasLeftRequired);
+    const leftUsers = db.users.filter((u) => u.hasLeftRequired && !u.joinedChannels.includes(ch.id));
+
+    return {
+      channelId: ch.id,
+      title: ch.title,
+      rawChannelId: ch.channelId,
+      type: ch.type,
+      required: ch.required,
+      inviteLink: ch.inviteLink,
+      isApprovalLink: ch.isApprovalLink,
+      isBotAdmin: ch.isBotAdmin,
+      memberCount: ch.memberCount,
+      activeBotMembersCount: joinedUsers.length,
+      verifiedMembersCount: verifiedUsers.length,
+      leftMembersCount: leftUsers.length,
+      members: joinedUsers.map((u) => ({
+        telegramId: u.telegramId,
+        firstName: u.firstName,
+        username: u.username,
+        isVerified: u.isVerified,
+        joinedAt: u.joinedAt,
+        lastActiveAt: u.lastActiveAt,
+        bonusBalance: u.bonusBalance,
+        referralCount: u.referralCount
+      }))
+    };
+  });
+
+  res.json({
+    totalChannels: db.channels.length,
+    groups: groupsData,
+    unassignedUsers: db.users.filter((u) => u.joinedChannels.length === 0).length
+  });
+});
+
+// Old Data Cleaner & Purge Endpoint
+app.post('/api/database/clean', (req: Request, res: Response) => {
+  const {
+    cleanLogs = false,
+    cleanUnverifiedUsers = false,
+    cleanInactiveUsers = false,
+    cleanExpiredCodes = false,
+    cleanBroadcasts = false,
+    resetAllUsers = false
+  } = req.body;
+
+  const purgedSummary: string[] = [];
+
+  if (cleanLogs) {
+    const keepCount = 10;
+    const removedCount = Math.max(0, db.logs.length - keepCount);
+    db.logs = db.logs.slice(0, keepCount);
+    purgedSummary.push(`Removed ${removedCount} audit logs (kept ${keepCount} latest)`);
+  }
+
+  if (cleanUnverifiedUsers) {
+    const beforeCount = db.users.length;
+    db.users = db.users.filter((u) => u.isVerified && !u.hasLeftRequired);
+    const removedCount = beforeCount - db.users.length;
+    purgedSummary.push(`Removed ${removedCount} unverified / abandoned users`);
+  }
+
+  if (cleanInactiveUsers) {
+    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const beforeCount = db.users.length;
+    db.users = db.users.filter((u) => {
+      const lastActive = new Date(u.lastActiveAt).getTime();
+      return !isNaN(lastActive) && lastActive > thirtyDaysAgo;
+    });
+    const removedCount = beforeCount - db.users.length;
+    purgedSummary.push(`Purged ${removedCount} inactive users (>30 days)`);
+  }
+
+  if (cleanExpiredCodes) {
+    const beforeCount = db.claimCodes.length;
+    db.claimCodes = db.claimCodes.filter((c) => c.isActive && c.currentUses < c.maxUses);
+    const removedCount = beforeCount - db.claimCodes.length;
+    purgedSummary.push(`Purged ${removedCount} exhausted / inactive claim codes`);
+  }
+
+  if (cleanBroadcasts) {
+    const count = db.broadcasts.length;
+    db.broadcasts = [];
+    purgedSummary.push(`Cleared ${count} past broadcast records`);
+  }
+
+  if (resetAllUsers) {
+    const count = db.users.length;
+    db.users = [];
+    purgedSummary.push(`Reset ALL ${count} users`);
+  }
+
+  saveDatabase(true);
+
+  db.logs.unshift({
+    id: `log-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    type: 'admin',
+    user: 'Database Cleanup Engine',
+    details: `Cleaned database: ${purgedSummary.join(', ')}`
+  });
+
+  res.json({
+    success: true,
+    message: `Database cleaned successfully! ${purgedSummary.join('. ')}`,
+    purgedSummary,
+    stats: {
+      users: db.users.length,
+      logs: db.logs.length,
+      claimCodes: db.claimCodes.length,
+      broadcasts: db.broadcasts.length
+    }
+  });
 });
 
 app.delete('/api/channels/:id', (req: Request, res: Response) => {
@@ -2271,7 +3553,7 @@ app.get('/api/codes', (req: Request, res: Response) => {
 });
 
 app.post('/api/codes', (req: Request, res: Response) => {
-  const { code, title, postContent, maxUses, isActive } = req.body;
+  const { code, title, postContent, maxUses, isActive, autoOverMinutes, autoDeleteMinutes, specificOverIST, overAction } = req.body;
   if (!code || !title || !postContent?.text) {
     return res.status(400).json({ error: 'code, title and postContent.text are required.' });
   }
@@ -2286,7 +3568,11 @@ app.post('/api/codes', (req: Request, res: Response) => {
       title,
       postContent,
       maxUses: maxUses ? parseInt(maxUses, 10) : 1000,
-      isActive: isActive !== undefined ? isActive : true
+      isActive: isActive !== undefined ? isActive : true,
+      autoOverMinutes: autoOverMinutes ? parseInt(autoOverMinutes, 10) : undefined,
+      autoDeleteMinutes: autoDeleteMinutes ? parseInt(autoDeleteMinutes, 10) : undefined,
+      specificOverIST: specificOverIST || undefined,
+      overAction: overAction || 'replace_with_over'
     };
     saveDatabase();
     return res.json({ success: true, code: db.claimCodes[existingIndex] });
@@ -2308,6 +3594,12 @@ app.post('/api/codes', (req: Request, res: Response) => {
     maxUses: maxUses ? parseInt(maxUses, 10) : 1000,
     currentUses: 0,
     isActive: isActive !== undefined ? isActive : true,
+    autoOverMinutes: autoOverMinutes ? parseInt(autoOverMinutes, 10) : undefined,
+    autoDeleteMinutes: autoDeleteMinutes ? parseInt(autoDeleteMinutes, 10) : undefined,
+    specificOverIST: specificOverIST || undefined,
+    overAction: overAction || 'replace_with_over',
+    isOver: false,
+    sentMessages: [],
     createdAt: new Date().toISOString(),
     claimedByUsers: []
   };
@@ -2324,6 +3616,18 @@ app.post('/api/codes', (req: Request, res: Response) => {
   });
 
   res.json({ success: true, code: newCode });
+});
+
+// Mark code as OVER ❌ (Replaces link with OVER ❌ across all users' screens)
+app.post('/api/codes/:id/over', async (req: Request, res: Response) => {
+  const result = await markClaimCodeOver(req.params.id, 'over');
+  res.json(result);
+});
+
+// Delete sent reward message from all users' Telegram screens
+app.post('/api/codes/:id/delete-messages', async (req: Request, res: Response) => {
+  const result = await markClaimCodeOver(req.params.id, 'delete');
+  res.json(result);
 });
 
 app.delete('/api/codes/:id', (req: Request, res: Response) => {
@@ -2396,6 +3700,20 @@ app.post('/api/broadcasts', (req: Request, res: Response) => {
   db.broadcasts.unshift(newBroadcast);
   saveDatabase();
 
+  if (isInstant && db.config.botToken && eligibleRecipients.length > 0) {
+    // Dispatch in background so response isn't blocked, update counts on complete
+    dispatchBroadcastToUsers(db.config.botToken, eligibleRecipients, {
+      text: postContent.text,
+      mediaType: postContent.mediaType,
+      mediaUrl: postContent.mediaUrl,
+      buttonText: postContent.buttonText,
+      buttonUrl: postContent.buttonUrl
+    }).then((res) => {
+      newBroadcast.sentCount = res.sent;
+      saveDatabase();
+    }).catch(console.error);
+  }
+
   db.logs.unshift({
     id: `log-${Date.now()}`,
     timestamp: new Date().toISOString(),
@@ -2422,17 +3740,32 @@ app.post('/api/broadcasts/:id/send-now', (req: Request, res: Response) => {
   });
 
   broadcast.status = 'sent';
-  broadcast.sentCount = eligibleRecipients.length;
   broadcast.totalRecipients = eligibleRecipients.length;
   broadcast.executedAt = new Date().toISOString();
   saveDatabase();
+
+  if (db.config.botToken && eligibleRecipients.length > 0) {
+    dispatchBroadcastToUsers(db.config.botToken, eligibleRecipients, {
+      text: broadcast.postContent.text,
+      mediaType: broadcast.postContent.mediaType,
+      mediaUrl: broadcast.postContent.mediaUrl,
+      buttonText: broadcast.postContent.buttonText,
+      buttonUrl: broadcast.postContent.buttonUrl
+    }).then((res) => {
+      broadcast.sentCount = res.sent;
+      saveDatabase();
+    }).catch(console.error);
+  } else {
+    broadcast.sentCount = eligibleRecipients.length;
+    saveDatabase();
+  }
 
   db.logs.unshift({
     id: `log-${Date.now()}`,
     timestamp: new Date().toISOString(),
     type: 'broadcast',
     user: 'Admin Panel',
-    details: `Manual trigger: sent broadcast "${broadcast.title}" to ${broadcast.sentCount} users.`
+    details: `Manual trigger: sent broadcast "${broadcast.title}" to ${broadcast.totalRecipients} users.`
   });
 
   res.json({ success: true, broadcast });
@@ -2880,6 +4213,33 @@ async function startServer() {
         runTelegramPolling();
       }
     }
+
+    // Auto-timer loop: Checks for expired claim codes & scheduled broadcasts every 15 seconds
+    setInterval(async () => {
+      const now = Date.now();
+      const istNow = getISTDateString();
+
+      // 1. Check claim codes auto-over and auto-delete
+      for (const code of db.claimCodes) {
+        if (code.isOver) continue;
+
+        // Auto-over minutes check
+        if (code.autoOverMinutes && code.autoOverMinutes > 0) {
+          const createdTime = new Date(code.createdAt).getTime();
+          const elapsed = (now - createdTime) / 60000;
+          if (elapsed >= code.autoOverMinutes) {
+            console.log(`⏱️ Auto-Over triggered for code: ${code.code}`);
+            await markClaimCodeOver(code.id, code.overAction === 'delete_message' ? 'delete' : 'over');
+          }
+        }
+
+        // Specific IST time check
+        if (code.specificOverIST && code.specificOverIST <= istNow) {
+          console.log(`⏱️ Specific IST Over triggered for code: ${code.code} at ${istNow}`);
+          await markClaimCodeOver(code.id, code.overAction === 'delete_message' ? 'delete' : 'over');
+        }
+      }
+    }, 15000);
   });
 }
 

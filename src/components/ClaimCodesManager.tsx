@@ -12,7 +12,12 @@ import {
   Music,
   ExternalLink,
   ShieldCheck,
-  CheckCircle2
+  CheckCircle2,
+  Clock,
+  XCircle,
+  RefreshCw,
+  Zap,
+  Timer
 } from 'lucide-react';
 import { ClaimCode, MediaType } from '../types/telegram.ts';
 
@@ -21,16 +26,20 @@ interface ClaimCodesManagerProps {
   onAddCode: (codeData: any) => Promise<void>;
   onDeleteCode: (id: string) => Promise<void>;
   onTestCodeInSimulator?: (code: string) => void;
+  onRefreshData?: () => Promise<void>;
 }
 
 export const ClaimCodesManager: React.FC<ClaimCodesManagerProps> = ({
   codes,
   onAddCode,
   onDeleteCode,
-  onTestCodeInSimulator
+  onTestCodeInSimulator,
+  onRefreshData
 }) => {
   const [showAddForm, setShowAddForm] = useState(false);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+  const [actionFeedback, setActionFeedback] = useState<{ id: string; msg: string; isError?: boolean } | null>(null);
   const [formData, setFormData] = useState({
     code: '',
     title: '',
@@ -41,7 +50,10 @@ export const ClaimCodesManager: React.FC<ClaimCodesManagerProps> = ({
     buttonUrl: '',
     secondaryButtonText: '',
     secondaryButtonUrl: '',
-    maxUses: 500
+    maxUses: 500,
+    autoOverMinutes: 0,
+    specificOverIST: '',
+    overAction: 'replace_with_over' as 'replace_with_over' | 'delete_message'
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
@@ -50,6 +62,45 @@ export const ClaimCodesManager: React.FC<ClaimCodesManagerProps> = ({
     navigator.clipboard.writeText(code);
     setCopiedCode(code);
     setTimeout(() => setCopiedCode(null), 2000);
+  };
+
+  const handleTriggerOver = async (code: ClaimCode) => {
+    setActionLoadingId(`over-${code.id}`);
+    setActionFeedback(null);
+    try {
+      const res = await fetch(`/api/codes/${code.id}/over`, { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        setActionFeedback({ id: code.id, msg: `✅ ${data.message}` });
+        if (onRefreshData) await onRefreshData();
+      } else {
+        setActionFeedback({ id: code.id, msg: `❌ ${data.message || 'Failed to mark OVER'}`, isError: true });
+      }
+    } catch (err: any) {
+      setActionFeedback({ id: code.id, msg: err.message, isError: true });
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  const handleTriggerDeleteMessages = async (code: ClaimCode) => {
+    if (!window.confirm(`Are you sure you want to DELETE this reward message from all users' Telegram screens for code ${code.code}?`)) return;
+    setActionLoadingId(`del-${code.id}`);
+    setActionFeedback(null);
+    try {
+      const res = await fetch(`/api/codes/${code.id}/delete-messages`, { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        setActionFeedback({ id: code.id, msg: `🗑️ ${data.message}` });
+        if (onRefreshData) await onRefreshData();
+      } else {
+        setActionFeedback({ id: code.id, msg: `❌ ${data.message || 'Failed to delete messages'}`, isError: true });
+      }
+    } catch (err: any) {
+      setActionFeedback({ id: code.id, msg: err.message, isError: true });
+    } finally {
+      setActionLoadingId(null);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -66,6 +117,9 @@ export const ClaimCodesManager: React.FC<ClaimCodesManagerProps> = ({
         code: formData.code.toUpperCase().trim(),
         title: formData.title.trim(),
         maxUses: formData.maxUses,
+        autoOverMinutes: formData.autoOverMinutes ? Number(formData.autoOverMinutes) : undefined,
+        specificOverIST: formData.specificOverIST || undefined,
+        overAction: formData.overAction,
         postContent: {
           text: formData.text,
           mediaType: formData.mediaType,
@@ -86,15 +140,20 @@ export const ClaimCodesManager: React.FC<ClaimCodesManagerProps> = ({
         buttonUrl: '',
         secondaryButtonText: '',
         secondaryButtonUrl: '',
-        maxUses: 500
+        maxUses: 500,
+        autoOverMinutes: 0,
+        specificOverIST: '',
+        overAction: 'replace_with_over'
       });
       setShowAddForm(false);
+      if (onRefreshData) await onRefreshData();
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to create claim code.');
     } finally {
       setIsSubmitting(false);
     }
   };
+
 
   return (
     <div className="space-y-6">

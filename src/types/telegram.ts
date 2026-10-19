@@ -9,6 +9,10 @@ export interface ForceJoinChannel {
   required: boolean;
   memberCount?: number;
   addedAt: string;
+  isBotAdmin?: boolean;
+  adminCheckStatus?: 'verified' | 'not_admin' | 'error' | 'pending';
+  isApprovalLink?: boolean;
+  approvalLinkCreated?: string;
 }
 
 export interface PostPayload {
@@ -21,6 +25,15 @@ export interface PostPayload {
   secondaryButtonUrl?: string;
 }
 
+export interface SentCodeMessage {
+  telegramId: string;
+  chatId: number | string;
+  messageId: number;
+  deliveredAt: string;
+  isOver?: boolean;
+  isDeleted?: boolean;
+}
+
 export interface ClaimCode {
   id: string;
   code: string; // e.g. "VIP2025"
@@ -31,6 +44,15 @@ export interface ClaimCode {
   isActive: boolean;
   createdAt: string;
   claimedByUsers: string[]; // telegramIds
+  // Automatic and manual Over / Expiry features
+  isOver?: boolean;
+  overAt?: string;
+  overText?: string;
+  autoOverMinutes?: number;
+  autoDeleteMinutes?: number;
+  specificOverIST?: string;
+  overAction?: 'replace_with_over' | 'delete_message';
+  sentMessages?: SentCodeMessage[];
 }
 
 export interface VerificationPost {
@@ -127,6 +149,13 @@ export interface BotConfig {
   showBonusButton: boolean;
   dailyBonusAmount: number;
   referralBonusAmount: number;
+  inviteButtonText?: string;
+  inviteButtonColor?: ButtonColor;
+  inviteCustomLink?: string;
+  inviteShareMessage?: string;
+  exclusiveContentButtonText?: string;
+  exclusiveContentUrl?: string;
+  exclusiveContentColor?: ButtonColor;
   backupGroupId?: string;
   backupGroupName?: string;
   autoBackupToGroup?: boolean;
