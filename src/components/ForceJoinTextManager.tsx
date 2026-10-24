@@ -182,23 +182,50 @@ export const ForceJoinTextManager: React.FC<ForceJoinTextManagerProps> = ({
 
             {/* Force Join Main / Welcome Message (Matches Exact Screenshot) */}
             <div>
-              <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center justify-between mb-1.5">
                 <label className="text-xs font-semibold text-slate-300">
                   Welcome / Force Join Text (/start message)
                 </label>
-                <span className="text-[10px] text-amber-400 font-mono">Telegram cmd: /setforcetext &lt;text&gt;</span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const current = formData.welcomeMessage || '';
+                      if (!current.startsWith('*') && !current.endsWith('*')) {
+                        setFormData({ ...formData, welcomeMessage: `*${current}*` });
+                      }
+                    }}
+                    className="px-2 py-0.5 text-[10px] font-bold bg-blue-600/30 hover:bg-blue-600 text-blue-200 hover:text-white rounded border border-blue-500/40 transition-colors"
+                    title="Poore message ko BOLD karein (*text*)"
+                  >
+                    B Bold (*...*)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const current = formData.welcomeMessage || '';
+                      setFormData({ ...formData, welcomeMessage: `_${current}_` });
+                    }}
+                    className="px-2 py-0.5 text-[10px] italic bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 transition-colors"
+                    title="Italic karein (_text_)"
+                  >
+                    I Italic (_..._)
+                  </button>
+                  <span className="text-[10px] text-amber-400 font-mono hidden sm:inline">cmd: /setforcetext &lt;text&gt;</span>
+                </div>
               </div>
               <textarea
                 rows={3}
                 value={formData.welcomeMessage}
                 onChange={(e) => setFormData({ ...formData, welcomeMessage: e.target.value })}
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs text-slate-100 focus:outline-none focus:border-blue-500 font-mono leading-relaxed"
-                placeholder="⚠️ You left a required channel/group. Please join again and press 🟢 CHECK JOIN."
+                placeholder="*⚠️ You left a required channel/group. Please join again and press 🟢 CHECK JOIN.*"
                 required
               />
-              <span className="text-[10px] text-slate-500 mt-1 block">
-                Yeh exact message Telegram bot me user ko `/start` par display hoti hai.
-              </span>
+              <div className="flex items-center justify-between text-[10px] text-slate-400 mt-1">
+                <span>💡 Telegram me **BOLD** karne ke liye text ke aage aur peeche <code className="text-blue-400 font-bold bg-slate-900 px-1 py-0.5 rounded">*text*</code> lagayein.</span>
+                <span className="text-emerald-400 font-mono">Markdown Supported</span>
+              </div>
             </div>
 
             {/* Leave Warning Alert Message */}

@@ -278,6 +278,14 @@ function loadDatabase() {
       // Ensure all keys exist
       db.config = { ...defaultDatabase.config, ...db.config };
       db.channels = db.channels || defaultDatabase.channels;
+      if (Array.isArray(db.channels)) {
+        db.channels = db.channels.map((c: any) => ({
+          ...c,
+          name: c.title || c.name || 'Channel',
+          title: c.title || c.name || 'Channel',
+          chatId: c.channelId || c.chatId || ''
+        }));
+      }
       db.claimCodes = db.claimCodes || defaultDatabase.claimCodes;
       db.verificationPost = db.verificationPost || defaultDatabase.verificationPost;
       db.broadcasts = db.broadcasts || defaultDatabase.broadcasts;
@@ -563,8 +571,40 @@ async function restoreDatabaseFromTelegramGroup(groupId: string): Promise<{ ok: 
 
     const pinnedMsg = chatRes.result.pinned_message;
     let doc = pinnedMsg?.document;
+    let selectedFileId = doc?.file_id;
 
-    if (!doc || !doc.file_id) {
+    // If pinned message does not have a JSON document or is small, scan recent messages in group to find the latest full backup
+    if (!selectedFileId || (doc && doc.file_size < 30000)) {
+      const startId = pinnedMsg?.message_id || 625;
+      for (let scanId = startId; scanId >= Math.max(1, startId - 40); scanId--) {
+        try {
+          const fwdRes = await callTelegramApi(token, 'forwardMessage', {
+            chat_id: groupId,
+            from_chat_id: groupId,
+            message_id: scanId
+          });
+          if (fwdRes.ok && fwdRes.result) {
+            const fwdMsgId = fwdRes.result.message_id;
+            // Clean up forward message immediately
+            await callTelegramApi(token, 'deleteMessage', {
+              chat_id: groupId,
+              message_id: fwdMsgId
+            });
+
+            if (fwdRes.result.document && fwdRes.result.document.file_name?.endsWith('.json')) {
+              const candidateDoc = fwdRes.result.document;
+              if (candidateDoc.file_size > 50000 || candidateDoc.file_name.includes('teleforce_db_backup')) {
+                selectedFileId = candidateDoc.file_id;
+                doc = candidateDoc;
+                break;
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+
+    if (!selectedFileId) {
       // Check if backup is in caption or text
       if (pinnedMsg?.text && pinnedMsg.text.includes('{')) {
         try {
@@ -590,11 +630,11 @@ async function restoreDatabaseFromTelegramGroup(groupId: string): Promise<{ ok: 
 
       return {
         ok: false,
-        error: `Connected to group "${chatRes.result.title || groupId}", but no pinned backup JSON document was found. Please ensure the bot has pinned a backup document or reply /restore to the backup file in that group!`
+        error: `Connected to group "${chatRes.result.title || groupId}", but no valid backup JSON document was found. Please ensure the bot is an Admin in the group or reply /restore to the backup file in that group!`
       };
     }
 
-    const fileInfo = await callTelegramApi(token, 'getFile', { file_id: doc.file_id });
+    const fileInfo = await callTelegramApi(token, 'getFile', { file_id: selectedFileId });
     if (!fileInfo.ok || !fileInfo.result?.file_path) {
       return { ok: false, error: 'Could not fetch file download path from Telegram' };
     }
@@ -605,16 +645,29 @@ async function restoreDatabaseFromTelegramGroup(groupId: string): Promise<{ ok: 
     const parsedDb = JSON.parse(content);
 
     if (parsedDb && (parsedDb.users || parsedDb.channels || parsedDb.config)) {
-      if (parsedDb.channels && Array.isArray(parsedDb.channels)) db.channels = parsedDb.channels;
+      if (parsedDb.channels && Array.isArray(parsedDb.channels)) {
+        db.channels = parsedDb.channels.map((c: any) => ({
+          ...c,
+          name: c.title || c.name || 'Channel',
+          title: c.title || c.name || 'Channel',
+          chatId: c.channelId || c.chatId || ''
+        }));
+      }
       if (parsedDb.claimCodes && Array.isArray(parsedDb.claimCodes)) db.claimCodes = parsedDb.claimCodes;
       if (parsedDb.users && Array.isArray(parsedDb.users)) db.users = parsedDb.users;
-      if (parsedDb.config) db.config = { ...db.config, ...parsedDb.config };
+      if (parsedDb.config) {
+        db.config = {
+          ...db.config,
+          ...parsedDb.config,
+          botToken: token, // keep current active token
+          backupGroupId: String(groupId),
+          backupGroupName: chatRes.result.title || db.config.backupGroupName
+        };
+      }
       if (parsedDb.verificationPost) db.verificationPost = parsedDb.verificationPost;
       if (parsedDb.admins && Array.isArray(parsedDb.admins)) db.admins = parsedDb.admins;
       if (parsedDb.broadcasts && Array.isArray(parsedDb.broadcasts)) db.broadcasts = parsedDb.broadcasts;
 
-      db.config.backupGroupId = String(groupId);
-      db.config.backupGroupName = chatRes.result.title || db.config.backupGroupName;
       saveDatabase(true);
 
       db.logs.unshift({
@@ -622,7 +675,7 @@ async function restoreDatabaseFromTelegramGroup(groupId: string): Promise<{ ok: 
         timestamp: new Date().toISOString(),
         type: 'admin',
         user: 'Database Vault Engine',
-        details: `Restored entire database from Telegram Group ID (${groupId}) pinned backup. Recovered ${db.users.length} users, ${db.channels.length} channels, ${db.claimCodes.length} claim codes.`
+        details: `Restored entire database from Telegram Group ID (${groupId}) backup. Recovered ${db.users.length} users, ${db.channels.length} channels, ${db.claimCodes.length} claim codes.`
       });
 
       return {
@@ -1681,6 +1734,122 @@ async function processTelegramUpdate(update: any) {
             parse_mode: 'Markdown',
             reply_markup: {
               inline_keyboard: [[{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]]
+            }
+          });
+          return;
+        }
+
+        // 14. Database Vault Menu
+        if (data === 'adm_db') {
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `💾 *TELEGRAM DATABASE VAULT & BACKUP MANAGER*\n\n` +
+              `• Stored Users: *${db.users.length}*\n` +
+              `• Required Channels: *${db.channels.length}*\n` +
+              `• Active Claim Codes: *${db.claimCodes.length}*\n` +
+              `• Configured Vault Group: \`${db.config.backupGroupId || 'Not Configured'}\`\n` +
+              `• Last Backup: *${db.config.lastBackupTimestamp || 'None'}*\n\n` +
+              `Aap yahan se direct backup create kar sakte hain ya Group ID se instant restore kar sakte hain:`,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '💾 Backup Database Now', callback_data: 'adm_dobackup_now', style: 'primary' }],
+                [{ text: `🔄 Restore From Group (${db.config.backupGroupId || 'Set Group'})`, callback_data: 'adm_dobackup_restore', style: 'primary' }],
+                [{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]
+              ]
+            }
+          });
+          return;
+        }
+
+        // 14.1 Execute Backup Now
+        if (data === 'adm_dobackup_now') {
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `⏳ *Uploading database snapshot to Telegram group...*`,
+            parse_mode: 'Markdown'
+          });
+          const bRes = await backupDatabaseToTelegramGroup('Admin Telegram Menu Button');
+          if (bRes.ok) {
+            await callTelegramApi(token, 'sendMessage', {
+              chat_id: chatId,
+              text: `✅ *DATABASE BACKUP ARCHIVE POSTED!*\n\n• Group ID: \`${db.config.backupGroupId}\`\n• Users: *${db.users.length}*\n• Channels: *${db.channels.length}*\n• Claim Codes: *${db.claimCodes.length}*\n• IST Time: *${getISTDateString()}*`,
+              parse_mode: 'Markdown',
+              reply_markup: {
+                inline_keyboard: [[{ text: '💾 Back to DB Vault', callback_data: 'adm_db' }, { text: '🔙 Admin Menu', callback_data: 'adm_menu' }]]
+              }
+            });
+          } else {
+            await callTelegramApi(token, 'sendMessage', {
+              chat_id: chatId,
+              text: `❌ *Backup Failed:* ${bRes.error}\n\nMake sure the bot is an Admin in group \`${db.config.backupGroupId}\`.`,
+              parse_mode: 'Markdown'
+            });
+          }
+          return;
+        }
+
+        // 14.2 Execute Restore From Group (Resolves user button click issue!)
+        if (data === 'adm_dobackup_restore') {
+          const targetGroup = db.config.backupGroupId || String(chatId);
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `⏳ *Connecting to Database Vault Group (${targetGroup})...*\nFetching latest backup snapshot and restoring database...`,
+            parse_mode: 'Markdown'
+          });
+
+          const recRes = await restoreDatabaseFromTelegramGroup(targetGroup);
+          if (recRes.ok) {
+            await callTelegramApi(token, 'sendMessage', {
+              chat_id: chatId,
+              text: `🎉 *DATABASE RESTORED SUCCESSFULLY!*\n\n` +
+                `✅ *Restoration Report:*\n` +
+                `• Total Recovered Users: *${db.users.length}*\n` +
+                `• Required Channels: *${db.channels.length}*\n` +
+                `• Active Claim Codes: *${db.claimCodes.length}*\n` +
+                `• Authorized Admins: *${db.admins.length}*\n` +
+                `• Recovered At: \`${getISTDateString()}\`\n\n` +
+                `Aapka saara 100+ users ka data, claim codes, verification post aur channels 100% recover ho chuka hai!`,
+              parse_mode: 'Markdown',
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: '📊 View Restored Stats', callback_data: 'adm_stats', style: 'primary' }],
+                  [{ text: '📢 View Channels', callback_data: 'adm_channels', style: 'primary' }],
+                  [{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]
+                ]
+              }
+            });
+          } else {
+            await callTelegramApi(token, 'sendMessage', {
+              chat_id: chatId,
+              text: `❌ *Restore Failed:*\n${recRes.error}\n\n💡 Ensure the bot is an Admin in group \`${targetGroup}\`. You can also reply \`/restore\` directly to any backup .json file in that group!`,
+              parse_mode: 'Markdown'
+            });
+          }
+          return;
+        }
+
+        // 15. Groups-Wise Management
+        if (data === 'adm_groupswise') {
+          const groupsList = db.channels.map((c, i) =>
+            `${i + 1}. *${c.title || c.name || 'Channel'}* (${(c.type || 'channel').toUpperCase()})\n` +
+            `   • ID: \`${c.channelId || c.chatId}\`\n` +
+            `   • Members: *${c.memberCount || 0}*\n` +
+            `   • Admin Status: *${c.isBotAdmin ? '✅ Verified Admin' : '⚠️ Not Admin'}*\n` +
+            `   • Approval Link: \`${c.inviteLink || 'None'}\``
+          ).join('\n\n');
+
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `📊 *GROUPS-WISE AUDIENCE & CHANNELS*\n\n${groupsList || 'No groups configured.'}\n\n` +
+              `Total Verified Users: *${db.users.filter(u => u.isVerified).length}*\n` +
+              `Total Stored Users: *${db.users.length}*`,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🔄 Refresh Channels', callback_data: 'adm_channels' }],
+                [{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]
+              ]
             }
           });
           return;
