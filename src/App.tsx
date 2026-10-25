@@ -30,7 +30,8 @@ import {
   Radio, 
   Layers,
   X,
-  Cloud
+  Cloud,
+  RotateCcw
 } from 'lucide-react';
 
 export default function App() {
@@ -38,6 +39,8 @@ export default function App() {
   const [isSimulatorOpen, setIsSimulatorOpen] = useState(true);
   const [isHostingModalOpen, setIsHostingModalOpen] = useState(false);
   const [activeTestCode, setActiveTestCode] = useState<string | undefined>(undefined);
+  const [isFixingCrash, setIsFixingCrash] = useState(false);
+  const [crashFixMessage, setCrashFixMessage] = useState<string | null>(null);
 
   // Data states
   const [channels, setChannels] = useState<ForceJoinChannel[]>([]);
@@ -265,6 +268,27 @@ export default function App() {
     setIsSimulatorOpen(true);
   };
 
+  const handleFixCrashAndRestart = async () => {
+    setIsFixingCrash(true);
+    setCrashFixMessage(null);
+    try {
+      const res = await fetch('/api/bot/fix-crash', { method: 'POST' });
+      const data = await res.json();
+      if (data.ok) {
+        setCrashFixMessage(data.message || 'Bot successfully restarted!');
+        await loadData();
+        setIsBotRunning(true);
+      } else {
+        setCrashFixMessage(data.message || 'Failed to restart bot.');
+      }
+    } catch (err: any) {
+      setCrashFixMessage(`Error: ${err.message}`);
+    } finally {
+      setIsFixingCrash(false);
+      setTimeout(() => setCrashFixMessage(null), 6000);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
       {/* Top Bar Contract (Wordmark - Links - Primary Action) */}
@@ -278,10 +302,25 @@ export default function App() {
         currentIST={currentIST}
         botUsername={config.botUsername}
         onOpenHostingGuide={() => setIsHostingModalOpen(true)}
+        onFixCrashRestart={handleFixCrashAndRestart}
+        isRestarting={isFixingCrash}
       />
 
       {/* Main Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {/* Crash Fix Alert Notification Banner */}
+        {crashFixMessage && (
+          <div className="mb-4 bg-gradient-to-r from-amber-950/70 to-orange-950/70 border border-amber-500/50 rounded-xl p-3.5 flex items-center justify-between text-xs text-amber-200 shadow-lg shadow-orange-950/30">
+            <div className="flex items-center gap-2.5">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span className="font-medium">{crashFixMessage}</span>
+            </div>
+            <button onClick={() => setCrashFixMessage(null)} className="text-slate-400 hover:text-white p-1">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         {/* Bot Live Status Strip */}
         <div className="mb-6 bg-slate-900/60 border border-slate-800 rounded-xl p-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-2.5">
@@ -300,6 +339,17 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2.5 flex-wrap">
+            {/* Crash Fix & Restart Button */}
+            <button
+              onClick={handleFixCrashAndRestart}
+              disabled={isFixingCrash}
+              className="px-2.5 py-1 rounded text-[11px] font-semibold transition-colors bg-gradient-to-r from-amber-600/40 to-orange-600/40 hover:from-amber-600/60 hover:to-orange-600/60 text-amber-200 border border-amber-500/40 flex items-center gap-1.5 cursor-pointer shadow-sm disabled:opacity-50"
+              title="Auto-fix Telegram connection, flush 409 conflict, and restart polling"
+            >
+              <RotateCcw className={`w-3 h-3 ${isFixingCrash ? 'animate-spin' : ''}`} />
+              <span>{isFixingCrash ? 'Fixing & Restarting...' : '🛠️ Fix Crash & Restart'}</span>
+            </button>
+
             <button
               onClick={() => setIsHostingModalOpen(true)}
               className="px-2.5 py-1 rounded text-[11px] font-semibold transition-colors bg-purple-600/25 hover:bg-purple-600/40 text-purple-200 border border-purple-500/30 flex items-center gap-1.5 cursor-pointer shadow-sm"

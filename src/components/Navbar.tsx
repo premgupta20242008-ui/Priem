@@ -10,7 +10,8 @@ import {
   Clock,
   Palette,
   Database,
-  Cloud
+  Cloud,
+  RotateCcw
 } from 'lucide-react';
 
 export type TabType = 'channels' | 'text_editor' | 'verification' | 'codes' | 'broadcast' | 'admins' | 'database' | 'settings';
@@ -25,6 +26,8 @@ interface NavbarProps {
   currentIST: string;
   botUsername: string;
   onOpenHostingGuide?: () => void;
+  onFixCrashRestart?: () => void;
+  isRestarting?: boolean;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -36,7 +39,9 @@ export const Navbar: React.FC<NavbarProps> = ({
   onToggleBotRunning,
   currentIST,
   botUsername,
-  onOpenHostingGuide
+  onOpenHostingGuide,
+  onFixCrashRestart,
+  isRestarting
 }) => {
   const tabs = [
     { id: 'channels' as TabType, label: 'Channels', icon: Layers },
@@ -108,6 +113,19 @@ export const Navbar: React.FC<NavbarProps> = ({
               <Cloud className="w-3.5 h-3.5 text-indigo-200" />
               <span>Host 24/7</span>
             </button>
+
+            {/* Crash Fix & Restart Button */}
+            {onFixCrashRestart && (
+              <button
+                onClick={onFixCrashRestart}
+                disabled={isRestarting}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all bg-gradient-to-r from-amber-600 to-orange-600 hover:brightness-110 text-white shadow-md shadow-orange-500/20 border border-orange-400/30 cursor-pointer disabled:opacity-50"
+                title="Fix Telegram connection, clear conflicts, reset webhook and restart bot engine"
+              >
+                <RotateCcw className={`w-3.5 h-3.5 ${isRestarting ? 'animate-spin' : ''}`} />
+                <span>{isRestarting ? 'Fixing...' : 'Fix Crash & Restart'}</span>
+              </button>
+            )}
 
             <button
               onClick={onToggleBotRunning}

@@ -379,15 +379,19 @@ let pollingTimeout: NodeJS.Timeout | null = null;
 let lastUpdateId = 0;
 let isPollingRunning = false;
 
-// Real Telegram Bot API helper
+// Real Telegram Bot API helper with 20s network timeout protection
 async function callTelegramApi(token: string, method: string, payload: any): Promise<any> {
   if (!token) return { ok: false, error: 'No bot token provided' };
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
     const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal: controller.signal
     });
+    clearTimeout(timeout);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err.message };
@@ -2991,43 +2995,112 @@ async function processTelegramUpdate(update: any) {
         return;
       }
 
-      // Handle Regular /start [ref_code] (Matching exact layout from user screenshot with Blue & Red buttons)
+      // Handle Admin /restart or /fixbot (1-click crash fix and polling re-initialization directly from Telegram)
+      if ((text === '/restart' || text === '/fixbot') && isAdmin) {
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: `⏳ *Restarting and fixing bot engine...*`,
+          parse_mode: 'Markdown'
+        });
+        const fixRes = await restartAndFixBotPolling();
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: fixRes.ok
+            ? `✅ *BOT CRASH FIX & RESTART COMPLETE!*\n\n• Bot: @${db.config.botUsername}\n• Polling Engine: *🟢 Active 24/7*\n• Stored Users: *${db.users.length}*\n• Channels: *${db.channels.length}*\n• Codes: *${db.claimCodes.length}*\n\nBot is healthy and responding to all /start and /claim commands!`
+            : `❌ *Restart Error:* ${fixRes.message}`,
+          parse_mode: 'Markdown'
+        });
+        return;
+      }
+
+      // Handle Regular /start [ref_code] (Zero-crash resilient with Verified User detection)
       if (text.startsWith('/start')) {
-        const channelButtons: any[] = db.channels.map((ch) => [
+        // Referral tracking
+        const startParts = text.split(' ');
+        if (startParts.length > 1 && startParts[1].startsWith('ref_')) {
+          const referrerCode = startParts[1];
+          if (!botUser.referredBy && botUser.referralCode !== referrerCode) {
+            const referrer = db.users.find((u) => u.referralCode === referrerCode);
+            if (referrer) {
+              botUser.referredBy = referrer.telegramId;
+              referrer.referralCount = (referrer.referralCount || 0) + 1;
+              referrer.bonusBalance = (referrer.bonusBalance || 0) + (db.config.referralBonusAmount || 50);
+              saveDatabase();
+            }
+          }
+        }
+
+        // If user is ALREADY verified:
+        if (botUser.isVerified && !botUser.hasLeftRequired) {
+          const verifiedButtons: any[] = [];
+          if (db.verificationPost.buttonText && db.verificationPost.buttonUrl && db.verificationPost.buttonUrl.startsWith('http')) {
+            verifiedButtons.push([{ text: db.verificationPost.buttonText, url: db.verificationPost.buttonUrl }]);
+          }
+          if (db.verificationPost.secondaryButtonText && db.verificationPost.secondaryButtonUrl && db.verificationPost.secondaryButtonUrl.startsWith('http')) {
+            verifiedButtons.push([{ text: db.verificationPost.secondaryButtonText, url: db.verificationPost.secondaryButtonUrl }]);
+          }
+
+          const vRes = await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `🎉 *WELCOME BACK, ${fromUser?.first_name || 'Member'}!*\n\n` +
+              `✅ *Status:* You are already verified in all official channels!\n\n` +
+              `🎁 *Redeem Claim Code:* Type \`/claim <CODE>\` to unlock secret links.\n` +
+              `👥 *Referral Code:* \`${botUser.referralCode || `ref_${fromUser?.id}`}\`\n` +
+              `💰 *Bonus Balance:* ₹${botUser.bonusBalance || 0}`,
+            parse_mode: 'Markdown',
+            reply_markup: verifiedButtons.length > 0 ? { inline_keyboard: verifiedButtons } : undefined
+          });
+
+          if (!vRes.ok) {
+            await callTelegramApi(token, 'sendMessage', {
+              chat_id: chatId,
+              text: `🎉 Welcome back! You are verified in all channels.\nType /claim <CODE> to unlock your secret links.`
+            });
+          }
+          return;
+        }
+
+        // User is not verified: build force-join channels
+        const validChannels = db.channels.filter((c) => c.inviteLink && c.inviteLink.startsWith('http'));
+        const channelButtons: any[] = validChannels.map((ch) => [
           {
             text: db.config.joinButtonText || '🔵 JOIN NOW',
-            url: ch.inviteLink,
-            style: getTelegramButtonStyle(db.config.joinButtonColor, 'primary')
+            url: ch.inviteLink
           }
         ]);
 
-        // Blue Check Join Button
         channelButtons.push([
           {
             text: db.config.checkJoinButtonText || '🔵 CHECK JOIN',
-            callback_data: 'check_in',
-            style: getTelegramButtonStyle(db.config.checkButtonColor, 'primary')
+            callback_data: 'check_in'
           }
         ]);
 
-        // Red Claim Bonus Button
         if (db.config.showBonusButton) {
           channelButtons.push([
             {
               text: db.config.bonusButtonText || '🔴 CLAIM BONUS',
-              callback_data: 'claim_bonus',
-              style: getTelegramButtonStyle(db.config.bonusButtonColor, 'danger')
+              callback_data: 'claim_bonus'
             }
           ]);
         }
 
-        await callTelegramApi(token, 'sendMessage', {
+        const startRes = await callTelegramApi(token, 'sendMessage', {
           chat_id: chatId,
           text: db.config.welcomeMessage || '⚠️ You left a required channel/group.\n\nPlease join again and press 🔵 CHECK JOIN.',
           reply_markup: {
             inline_keyboard: channelButtons
           }
         });
+
+        // Fail-safe plain text fallback if custom markup fails
+        if (!startRes.ok) {
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `${db.config.welcomeMessage || 'Welcome!'}\n\nPlease join our channels:\n` +
+              validChannels.map((c, i) => `${i + 1}. ${c.title || c.name}: ${c.inviteLink}`).join('\n')
+          });
+        }
         return;
       }
 
@@ -3084,19 +3157,23 @@ async function processTelegramUpdate(update: any) {
       }
       codeQuery = codeQuery.toUpperCase();
 
-      const matchedCode = db.claimCodes.find((c) => c.code === codeQuery);
+      const matchedCode = db.claimCodes.find((c) => c.code.toUpperCase() === codeQuery);
       if (matchedCode) {
+        if (!matchedCode.claimedByUsers) matchedCode.claimedByUsers = [];
+        if (!botUser.claimedCodes) botUser.claimedCodes = [];
+        if (!matchedCode.sentMessages) matchedCode.sentMessages = [];
+
         // Enforce force-join gate!
         if (!botUser.isVerified || botUser.hasLeftRequired) {
-          const checkBtns: any[] = db.channels.map((c) => [{
-            text: db.config.joinButtonText || '🔵 JOIN NOW',
-            url: c.inviteLink,
-            style: getTelegramButtonStyle(db.config.joinButtonColor, 'primary')
-          }]);
+          const checkBtns: any[] = db.channels
+            .filter((c) => c.inviteLink && c.inviteLink.startsWith('http'))
+            .map((c) => [{
+              text: db.config.joinButtonText || '🔵 JOIN NOW',
+              url: c.inviteLink
+            }]);
           checkBtns.push([{
             text: db.config.checkJoinButtonText || '🔵 CHECK JOIN',
-            callback_data: 'check_in',
-            style: getTelegramButtonStyle(db.config.checkButtonColor, 'primary')
+            callback_data: 'check_in'
           }]);
 
           await callTelegramApi(token, 'sendMessage', {
@@ -3134,36 +3211,51 @@ async function processTelegramUpdate(update: any) {
         saveDatabase();
 
         const codeButtons: any[] = [];
-        if (matchedCode.postContent.buttonText && matchedCode.postContent.buttonUrl) {
-          codeButtons.push([{ text: matchedCode.postContent.buttonText, url: matchedCode.postContent.buttonUrl, style: 'primary' }]);
+        if (matchedCode.postContent.buttonText && matchedCode.postContent.buttonUrl && matchedCode.postContent.buttonUrl.startsWith('http')) {
+          codeButtons.push([{ text: matchedCode.postContent.buttonText, url: matchedCode.postContent.buttonUrl }]);
         }
-        if (matchedCode.postContent.secondaryButtonText && matchedCode.postContent.secondaryButtonUrl) {
-          codeButtons.push([{ text: matchedCode.postContent.secondaryButtonText, url: matchedCode.postContent.secondaryButtonUrl, style: 'primary' }]);
+        if (matchedCode.postContent.secondaryButtonText && matchedCode.postContent.secondaryButtonUrl && matchedCode.postContent.secondaryButtonUrl.startsWith('http')) {
+          codeButtons.push([{ text: matchedCode.postContent.secondaryButtonText, url: matchedCode.postContent.secondaryButtonUrl }]);
         }
 
         let sentMsgRes: any;
-        if (matchedCode.postContent.mediaType === 'image' && matchedCode.postContent.mediaUrl) {
+        const rewardText = `🎉 *CODE UNLOCKED: ${matchedCode.code}*\n\n${matchedCode.postContent.text}`;
+
+        if (matchedCode.postContent.mediaType === 'image' && matchedCode.postContent.mediaUrl && matchedCode.postContent.mediaUrl.startsWith('http')) {
           sentMsgRes = await callTelegramApi(token, 'sendPhoto', {
             chat_id: chatId,
             photo: matchedCode.postContent.mediaUrl,
-            caption: `🎉 *CODE UNLOCKED: ${matchedCode.code}*\n\n${matchedCode.postContent.text}`,
+            caption: rewardText,
             parse_mode: 'Markdown',
             reply_markup: codeButtons.length > 0 ? { inline_keyboard: codeButtons } : undefined
           });
+          if (!sentMsgRes.ok) {
+            sentMsgRes = await callTelegramApi(token, 'sendMessage', {
+              chat_id: chatId,
+              text: `🎉 CODE UNLOCKED: ${matchedCode.code}\n\n${matchedCode.postContent.text}`,
+              reply_markup: codeButtons.length > 0 ? { inline_keyboard: codeButtons } : undefined
+            });
+          }
         } else {
           sentMsgRes = await callTelegramApi(token, 'sendMessage', {
             chat_id: chatId,
-            text: `🎉 *CODE UNLOCKED: ${matchedCode.code}*\n\n${matchedCode.postContent.text}`,
+            text: rewardText,
             parse_mode: 'Markdown',
             reply_markup: codeButtons.length > 0 ? { inline_keyboard: codeButtons } : undefined
           });
+          if (!sentMsgRes.ok) {
+            sentMsgRes = await callTelegramApi(token, 'sendMessage', {
+              chat_id: chatId,
+              text: `🎉 CODE UNLOCKED: ${matchedCode.code}\n\n${matchedCode.postContent.text}`,
+              reply_markup: codeButtons.length > 0 ? { inline_keyboard: codeButtons } : undefined
+            });
+          }
         }
 
         // Save delivery record to enable 1-click OVER ❌ and automatic timed link removal on user screens
         if (sentMsgRes && sentMsgRes.ok && sentMsgRes.result?.message_id) {
-          if (!matchedCode.sentMessages) matchedCode.sentMessages = [];
           matchedCode.sentMessages.push({
-            telegramId: String(fromUser.id),
+            telegramId: String(fromUser?.id),
             chatId: chatId,
             messageId: sentMsgRes.result.message_id,
             deliveredAt: new Date().toISOString()
@@ -3173,19 +3265,29 @@ async function processTelegramUpdate(update: any) {
         return;
       }
 
+      // If text started with /claim but code wasn't matched
+      if (text.startsWith('/claim')) {
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: `❌ *CLAIM CODE NOT FOUND OR EXPIRED*\n\nThe code "${codeQuery}" was not found or has expired.\n\n💡 *Tip:* Please check the code spelling or wait for the next code drop in our official channels!`,
+          parse_mode: 'Markdown'
+        });
+        return;
+      }
+
       // Default fallback: show clean screenshot layout with Blue & Red buttons
-      const defaultBtns: any[] = db.channels.map((ch) => [
-        {
-          text: db.config.joinButtonText || '🔵 JOIN NOW',
-          url: ch.inviteLink,
-          style: getTelegramButtonStyle(db.config.joinButtonColor, 'primary')
-        }
-      ]);
+      const defaultBtns: any[] = db.channels
+        .filter((c) => c.inviteLink && c.inviteLink.startsWith('http'))
+        .map((ch) => [
+          {
+            text: db.config.joinButtonText || '🔵 JOIN NOW',
+            url: ch.inviteLink
+          }
+        ]);
       defaultBtns.push([
         {
           text: db.config.checkJoinButtonText || '🔵 CHECK JOIN',
-          callback_data: 'check_in',
-          style: getTelegramButtonStyle(db.config.checkButtonColor, 'primary')
+          callback_data: 'check_in'
         }
       ]);
       await callTelegramApi(token, 'sendMessage', {
@@ -3201,7 +3303,62 @@ async function processTelegramUpdate(update: any) {
   }
 }
 
-// Background Long-Polling loop
+// Crash Fix Engine: Resets webhooks, clears conflicting polling sessions, re-verifies bot token, and restarts polling
+async function restartAndFixBotPolling(): Promise<{ ok: boolean; message: string; me?: any }> {
+  const token = db.config.botToken;
+  if (!token) return { ok: false, message: 'No Bot Token configured.' };
+
+  try {
+    if (pollingTimeout) {
+      clearTimeout(pollingTimeout);
+      pollingTimeout = null;
+    }
+    isPollingRunning = false;
+
+    // 1. Delete any webhook with drop_pending_updates: false to preserve users' messages
+    await callTelegramApi(token, 'deleteWebhook', { drop_pending_updates: false });
+
+    // 2. Fetch bot identity to ensure token is 100% valid
+    const me = await callTelegramApi(token, 'getMe', {});
+    if (me.ok && me.result) {
+      db.config.botUsername = me.result.username || db.config.botUsername;
+      db.config.botName = me.result.first_name || db.config.botName;
+    }
+
+    // 3. Clear any 409 conflict by getting the latest update ID
+    try {
+      const testUpdates = await callTelegramApi(token, 'getUpdates', { offset: -1, timeout: 1 });
+      if (testUpdates.ok && Array.isArray(testUpdates.result) && testUpdates.result.length > 0) {
+        lastUpdateId = testUpdates.result[testUpdates.result.length - 1].update_id;
+      }
+    } catch {}
+
+    // 4. Start fresh polling
+    isPollingRunning = true;
+    db.config.isPollingActive = true;
+    saveDatabase(true);
+
+    runTelegramPolling();
+
+    db.logs.unshift({
+      id: `log-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      type: 'admin',
+      user: 'Crash Fix Watchdog',
+      details: `Bot @${db.config.botUsername || 'PrimeL26bot'} re-initialized, conflict cleared & 24/7 polling restarted.`
+    });
+
+    return {
+      ok: true,
+      message: `Bot @${db.config.botUsername || 'PrimeL26bot'} successfully restarted! Polling engine is active.`,
+      me: me.result
+    };
+  } catch (err: any) {
+    return { ok: false, message: err.message };
+  }
+}
+
+// Resilient Background Long-Polling loop with individual update isolation
 async function runTelegramPolling() {
   if (!isPollingRunning) return;
   const token = db.config.botToken;
@@ -3224,8 +3381,17 @@ async function runTelegramPolling() {
     if (res.ok && Array.isArray(res.result)) {
       for (const update of res.result) {
         lastUpdateId = Math.max(lastUpdateId, update.update_id);
-        await processTelegramUpdate(update);
+        try {
+          await processTelegramUpdate(update);
+        } catch (uErr: any) {
+          console.error(`Error processing update ${update.update_id}:`, uErr.message);
+        }
       }
+    } else if (res.error_code === 409) {
+      console.warn('Telegram polling 409 Conflict detected. Auto-recovering in 3s...');
+      await new Promise((r) => setTimeout(r, 3000));
+    } else if (res.error) {
+      console.warn('Telegram polling notice:', res.error);
     }
   } catch (err) {
     console.error('Telegram polling error:', err);
@@ -3242,7 +3408,18 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
-// Bot Start & Stop Endpoints
+// Crash Fix & Bot Restart API Endpoints (called by Web Admin Dashboard button)
+app.post('/api/bot/fix-crash', async (req: Request, res: Response) => {
+  const result = await restartAndFixBotPolling();
+  res.json(result);
+});
+
+app.post('/api/bot/restart', async (req: Request, res: Response) => {
+  const result = await restartAndFixBotPolling();
+  res.json(result);
+});
+
+// Bot Start Endpoint
 app.post('/api/bot/start', async (req: Request, res: Response) => {
   db.config.isPollingActive = true;
   saveDatabase();

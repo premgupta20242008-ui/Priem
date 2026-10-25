@@ -12,7 +12,8 @@ import {
   FileText,
   AlertTriangle,
   ExternalLink,
-  Cloud
+  Cloud,
+  RotateCcw
 } from 'lucide-react';
 import { BotConfig } from '../types/telegram.ts';
 
@@ -36,6 +37,22 @@ export const BotSettings: React.FC<BotSettingsProps> = ({
   const [testSendResult, setTestSendResult] = useState<any>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [isFixingCrash, setIsFixingCrash] = useState(false);
+  const [crashFixResult, setCrashFixResult] = useState<any>(null);
+
+  const handleFixCrash = async () => {
+    setIsFixingCrash(true);
+    setCrashFixResult(null);
+    try {
+      const res = await fetch('/api/bot/fix-crash', { method: 'POST' });
+      const data = await res.json();
+      setCrashFixResult(data);
+    } catch (err: any) {
+      setCrashFixResult({ ok: false, message: err.message });
+    } finally {
+      setIsFixingCrash(false);
+    }
+  };
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -333,8 +350,49 @@ export const BotSettings: React.FC<BotSettingsProps> = ({
           </form>
         </div>
 
-        {/* Right Column: Live Telegram Message Dispatcher */}
+        {/* Right Column: Bot Health Recovery & Live Telegram Message Dispatcher */}
         <div className="lg:col-span-5 space-y-4">
+          {/* Bot Crash Fix & Health Recovery Card */}
+          <div className="bg-gradient-to-br from-amber-950/40 via-slate-900/80 to-slate-900 border border-amber-500/30 rounded-xl p-5 shadow-sm space-y-3">
+            <div className="text-sm font-semibold text-white flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <RotateCcw className="w-4 h-4 text-amber-400" />
+                <span>Bot Health & Crash Recovery</span>
+              </div>
+              <span className="text-[10px] font-mono uppercase bg-amber-500/20 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded">
+                1-Click Fix
+              </span>
+            </div>
+            <p className="text-xs text-slate-300">
+              Agar bot Telegram pe <code className="text-amber-300 font-mono">/start</code> ya <code className="text-amber-300 font-mono">/claim</code> ka response na de ya crash ho jaye (socket timeout, webhook conflict, ya 409 error), toh is button se instant restart karein.
+            </p>
+            <button
+              type="button"
+              onClick={handleFixCrash}
+              disabled={isFixingCrash}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-gradient-to-r from-amber-600 to-orange-600 hover:brightness-110 text-white rounded-lg text-xs font-bold transition-all shadow-md shadow-orange-500/20 disabled:opacity-50 cursor-pointer"
+            >
+              <RotateCcw className={`w-4 h-4 ${isFixingCrash ? 'animate-spin' : ''}`} />
+              <span>{isFixingCrash ? 'Fixing Connection & Restarting...' : '🛠️ Fix Crash & Restart Bot Engine'}</span>
+            </button>
+            {crashFixResult && (
+              <div className={`p-2.5 rounded-lg text-xs border ${
+                crashFixResult.ok
+                  ? 'bg-emerald-950/50 border-emerald-800 text-emerald-300'
+                  : 'bg-red-950/50 border-red-800 text-red-300'
+              }`}>
+                <div className="flex items-center gap-2">
+                  {crashFixResult.ok ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                  )}
+                  <span>{crashFixResult.message || (crashFixResult.ok ? 'Bot successfully restarted!' : 'Failed to restart')}</span>
+                </div>
+              </div>
+            )}
+          </div>
+
           <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm space-y-4">
             <div className="text-sm font-semibold text-white flex items-center gap-2 border-b border-slate-800 pb-3">
               <Send className="w-4 h-4 text-blue-400" />
