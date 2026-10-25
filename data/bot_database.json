@@ -27,8 +27,8 @@
     "backupGroupId": "-1004496308666",
     "backupGroupName": "PrimeAds Database Vault",
     "autoBackupToGroup": true,
-    "lastBackupTimestamp": "2026-10-25 09:37:35",
-    "lastBackupMessageId": 748
+    "lastBackupTimestamp": "2026-10-25 10:38:16",
+    "lastBackupMessageId": 857
   },
   "channels": [
     {
@@ -985,11 +985,13 @@
       "username": "NehalAryan01",
       "firstName": "Nehal",
       "isVerified": false,
-      "joinedChannels": [],
+      "joinedChannels": [
+        "ch-1792432143983"
+      ],
       "joinedAt": "2026-10-20T14:12:08.135Z",
-      "lastActiveAt": "2026-10-22T16:03:34.782Z",
+      "lastActiveAt": "2026-10-25T05:07:18.291Z",
       "hasLeftRequired": true,
-      "leftChannelsAlertCount": 0,
+      "leftChannelsAlertCount": 1,
       "referralCode": "ref_8912398673",
       "referralCount": 0,
       "bonusBalance": 0,
@@ -1170,7 +1172,7 @@
         "ch-1792432143983"
       ],
       "joinedAt": "2026-10-21T05:39:42.949Z",
-      "lastActiveAt": "2026-10-21T05:39:42.950Z",
+      "lastActiveAt": "2026-10-25T05:07:21.136Z",
       "hasLeftRequired": true,
       "leftChannelsAlertCount": 0,
       "referralCode": "ref_6260843792",
@@ -1995,7 +1997,7 @@
         "ch-1792432250167"
       ],
       "joinedAt": "2026-10-22T05:22:17.831Z",
-      "lastActiveAt": "2026-10-22T05:27:39.979Z",
+      "lastActiveAt": "2026-10-25T05:06:25.332Z",
       "hasLeftRequired": false,
       "leftChannelsAlertCount": 0,
       "referralCode": "ref_7418164162",
@@ -2347,9 +2349,59 @@
       "referralCount": 0,
       "bonusBalance": 0,
       "claimedCodes": []
+    },
+    {
+      "telegramId": "test_check_user",
+      "username": "telegram_tester",
+      "firstName": "You (Tester)",
+      "isVerified": false,
+      "joinedChannels": [],
+      "joinedAt": "2026-10-25T05:13:29.505Z",
+      "lastActiveAt": "2026-10-25T05:13:29.507Z",
+      "hasLeftRequired": false,
+      "leftChannelsAlertCount": 0,
+      "referralCode": "ref_test_check_user",
+      "referralCount": 0,
+      "bonusBalance": 0,
+      "claimedCodes": []
     }
   ],
   "logs": [
+    {
+      "id": "log-1792904898832",
+      "timestamp": "2026-10-25T05:08:18.832Z",
+      "type": "admin",
+      "user": "Database Vault Engine",
+      "details": "Saved & pinned database backup document in Telegram Group (-1004496308666). Msg ID: 857"
+    },
+    {
+      "id": "log-1792904887626",
+      "timestamp": "2026-10-25T05:08:07.626Z",
+      "type": "leave",
+      "user": "Nehal (8912398673)",
+      "details": "Detected leaving P. Sending re-join alert message."
+    },
+    {
+      "id": "log-1792904853347",
+      "timestamp": "2026-10-25T05:07:33.347Z",
+      "type": "admin",
+      "user": "Database Vault Engine",
+      "details": "Saved & pinned database backup document in Telegram Group (-1004496308666). Msg ID: 847"
+    },
+    {
+      "id": "log-1792904798220",
+      "timestamp": "2026-10-25T05:06:38.220Z",
+      "type": "admin",
+      "user": "Database Vault Engine",
+      "details": "Saved & pinned database backup document in Telegram Group (-1004496308666). Msg ID: 841"
+    },
+    {
+      "id": "log-1792904763046",
+      "timestamp": "2026-10-25T05:06:03.046Z",
+      "type": "admin",
+      "user": "Database Vault Engine",
+      "details": "Saved & pinned database backup document in Telegram Group (-1004496308666). Msg ID: 833"
+    },
     {
       "id": "log-1792901258294",
       "timestamp": "2026-10-25T04:07:38.294Z",

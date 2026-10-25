@@ -398,6 +398,54 @@ async function callTelegramApi(token: string, method: string, payload: any): Pro
   }
 }
 
+// Robust channel matching helper (matches by ID with/without -100 prefix, internal ID, chatId, or @username)
+function isChannelMatch(channel: ForceJoinChannel, chat: any): boolean {
+  if (!chat || !channel) return false;
+  const chatId = String(chat.id || '').trim();
+  const rawChatId = chatId.replace(/^-100/, '');
+  const chatUsername = chat.username ? chat.username.toLowerCase().replace(/^@/, '') : '';
+
+  const cId = String(channel.channelId || '').trim().toLowerCase();
+  const rawCId = cId.replace(/^-100/, '').replace(/^@/, '');
+  const chInternalId = String(channel.id || '').trim();
+  const chChatId = String((channel as any).chatId || '').trim();
+
+  if (cId === chatId || chInternalId === chatId || chChatId === chatId) return true;
+  if (rawCId && rawChatId && rawCId === rawChatId) return true;
+  if (chatUsername && (rawCId === chatUsername || cId === `@${chatUsername}`)) return true;
+  return false;
+}
+
+// Resilient Telegram message sender with automatic fallback if Markdown entity parsing fails
+async function sendTelegramMessageSafe(
+  token: string,
+  chatId: number | string,
+  text: string,
+  options: {
+    parse_mode?: string;
+    reply_markup?: any;
+  } = {}
+) {
+  let res = await callTelegramApi(token, 'sendMessage', {
+    chat_id: chatId,
+    text,
+    ...options
+  });
+  if (!res.ok && options.parse_mode) {
+    // Retry immediately with plain text to guarantee delivery if Markdown formatting has syntax issues
+    const cleanText = text
+      .replace(/\*([^*]+)\*/g, '$1')
+      .replace(/_([^_]+)_/g, '$1')
+      .replace(/`([^`]+)`/g, '$1');
+    res = await callTelegramApi(token, 'sendMessage', {
+      chat_id: chatId,
+      text: cleanText,
+      reply_markup: options.reply_markup
+    });
+  }
+  return res;
+}
+
 // Real Telegram API helper to check if a user is a member of a channel/group
 async function checkTelegramChatMember(token: string, chatId: string, userId: number | string): Promise<boolean> {
   try {
@@ -407,8 +455,24 @@ async function checkTelegramChatMember(token: string, chatId: string, userId: nu
     });
     if (res.ok && res.result) {
       const status = res.result.status;
-      return ['creator', 'administrator', 'member', 'restricted'].includes(status);
+      if (['creator', 'administrator', 'member', 'restricted'].includes(status)) {
+        return true;
+      }
     }
+
+    // Auto-approve pending join request if user submitted a request via bot approval link
+    const approveRes = await callTelegramApi(token, 'approveChatJoinRequest', {
+      chat_id: chatId,
+      user_id: userId
+    });
+    if (approveRes.ok) {
+      return true;
+    }
+    const desc = String(approveRes.description || '').toLowerCase();
+    if (desc.includes('already_participant') || desc.includes('already a participant') || desc.includes('already a member')) {
+      return true;
+    }
+
     return false;
   } catch {
     return false;
@@ -922,11 +986,15 @@ async function processTelegramUpdate(update: any) {
         db.users.push(botUser);
       }
 
-      const matchedChannel = db.channels.find(
-        (c) => c.channelId.toLowerCase() === `@${chat.username?.toLowerCase()}` || c.channelId === String(chat.id)
-      );
+      const matchedChannel = db.channels.find((c) => isChannelMatch(c, chat));
       if (matchedChannel && !botUser.joinedChannels.includes(matchedChannel.id)) {
         botUser.joinedChannels.push(matchedChannel.id);
+      }
+
+      // Check if all required channels are fulfilled
+      const requiredChannels = db.channels.filter((c) => c.required);
+      if (requiredChannels.length > 0 && requiredChannels.every((c) => botUser.joinedChannels.includes(c.id))) {
+        botUser.hasLeftRequired = false;
       }
 
       saveDatabase();
@@ -935,18 +1003,16 @@ async function processTelegramUpdate(update: any) {
         id: `log-${Date.now()}`,
         timestamp: new Date().toISOString(),
         type: 'join',
-        user: `${user.first_name} (${user.id})`,
+        user: `${user.first_name || 'User'} (${user.id})`,
         details: `Auto-approved join request for ${chat.title || chat.username || chat.id} created by bot approval link!`
       });
 
       try {
-        await callTelegramApi(token, 'sendMessage', {
-          chat_id: user.id,
-          text: `🎉 *JOIN REQUEST APPROVED!*\n\nYour request to join *${chat.title || 'Official Channel'}* has been automatically approved!\n\nPlease return to the bot and press 🔵 CHECK JOIN to verify and claim your access.`,
+        await sendTelegramMessageSafe(token, user.id, `🎉 *JOIN REQUEST APPROVED!*\n\nYour request to join *${chat.title || 'Official Channel'}* has been automatically approved!\n\nPlease return to the bot and press 🔵 CHECK JOIN to verify and claim your access.`, {
           parse_mode: 'Markdown',
           reply_markup: {
             inline_keyboard: [
-              [{ text: db.config.checkJoinButtonText || '🔵 CHECK JOIN', callback_data: 'check_in', style: 'primary' }]
+              [{ text: db.config.checkJoinButtonText || '🔵 CHECK JOIN', callback_data: 'check_in', style: getTelegramButtonStyle(db.config.checkButtonColor, 'success') }]
             ]
           }
         });
@@ -958,24 +1024,63 @@ async function processTelegramUpdate(update: any) {
     // 1. Handle Leave/Join Events via chat_member updates
     if (update.chat_member) {
       const cm = update.chat_member;
-      const user = cm.from;
+      const targetUser = cm.new_chat_member?.user || cm.from;
       const newStatus = cm.new_chat_member?.status;
       const oldStatus = cm.old_chat_member?.status;
 
-      if (newStatus === 'left' || newStatus === 'kicked') {
-        // User left a channel/group!
-        const matchedChannel = db.channels.find(
-          (c) => c.channelId.toLowerCase() === `@${update.chat_member.chat?.username?.toLowerCase()}` ||
-                 c.channelId === String(update.chat_member.chat?.id)
-        );
+      const matchedChannel = db.channels.find((c) => isChannelMatch(c, cm.chat));
 
-        if (matchedChannel && matchedChannel.required) {
+      // Handle user JOIN:
+      if (newStatus === 'member' || newStatus === 'administrator' || newStatus === 'creator') {
+        if (matchedChannel && targetUser) {
+          let botUser = db.users.find((u) => u.telegramId === String(targetUser.id));
+          if (!botUser) {
+            botUser = {
+              telegramId: String(targetUser.id),
+              username: targetUser.username || '',
+              firstName: targetUser.first_name || 'User',
+              isVerified: false,
+              joinedChannels: [],
+              joinedAt: new Date().toISOString(),
+              lastActiveAt: new Date().toISOString(),
+              hasLeftRequired: false,
+              leftChannelsAlertCount: 0,
+              referralCode: `ref_${targetUser.id}`,
+              referralCount: 0,
+              bonusBalance: 0,
+              claimedCodes: []
+            };
+            db.users.push(botUser);
+          }
+          if (!botUser.joinedChannels.includes(matchedChannel.id)) {
+            botUser.joinedChannels.push(matchedChannel.id);
+          }
+          const requiredChannels = db.channels.filter((c) => c.required);
+          if (requiredChannels.length > 0 && requiredChannels.every((c) => botUser.joinedChannels.includes(c.id))) {
+            botUser.hasLeftRequired = false;
+          }
+          saveDatabase();
+
+          db.logs.unshift({
+            id: `log-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            type: 'join',
+            user: `${targetUser.first_name || 'User'} (${targetUser.id})`,
+            details: `Joined channel ${matchedChannel.title} (${matchedChannel.channelId}).`
+          });
+        }
+      }
+
+      // Handle user LEAVE or KICK:
+      if (newStatus === 'left' || newStatus === 'kicked') {
+        if (matchedChannel && (matchedChannel.required !== false) && targetUser) {
           // Find bot user
-          let botUser = db.users.find((u) => u.telegramId === String(user.id));
+          let botUser = db.users.find((u) => u.telegramId === String(targetUser.id));
           if (botUser) {
             botUser.hasLeftRequired = true;
             botUser.isVerified = false;
-            botUser.leftChannelsAlertCount += 1;
+            botUser.leftChannelsAlertCount = (botUser.leftChannelsAlertCount || 0) + 1;
+            botUser.joinedChannels = botUser.joinedChannels.filter((id) => id !== matchedChannel.id && id !== matchedChannel.channelId);
             saveDatabase();
           }
 
@@ -983,23 +1088,25 @@ async function processTelegramUpdate(update: any) {
             id: `log-${Date.now()}`,
             timestamp: new Date().toISOString(),
             type: 'leave',
-            user: `${user.first_name} (${user.id})`,
-            details: `Detected leaving ${matchedChannel.title}. Sending re-join alert message.`
+            user: `${targetUser.first_name || 'User'} (${targetUser.id})`,
+            details: `Detected leaving ${matchedChannel.title}. Triggered instant re-join alert message to user.`
           });
 
-          // Send direct warning message to user matching uploaded screenshot with Blue & Red colored buttons
-          const leaveKeyboard: any[] = db.channels.map((ch) => [
-            {
-              text: db.config.joinButtonText || '🔵 JOIN NOW',
-              url: ch.inviteLink,
-              style: getTelegramButtonStyle(db.config.joinButtonColor, 'primary')
-            }
-          ]);
+          // Send direct warning message to user matching uploaded screenshot with Blue & Green & Red colored buttons
+          const leaveKeyboard: any[] = db.channels
+            .filter((c) => c.inviteLink && c.inviteLink.startsWith('http'))
+            .map((ch) => [
+              {
+                text: db.config.joinButtonText || '🔵 JOIN NOW',
+                url: ch.inviteLink,
+                style: getTelegramButtonStyle(db.config.joinButtonColor, 'primary')
+              }
+            ]);
           leaveKeyboard.push([
             {
               text: db.config.checkJoinButtonText || '🔵 CHECK JOIN',
               callback_data: 'check_in',
-              style: getTelegramButtonStyle(db.config.checkButtonColor, 'primary')
+              style: getTelegramButtonStyle(db.config.checkButtonColor, 'success')
             }
           ]);
           if (db.config.showBonusButton) {
@@ -1012,13 +1119,18 @@ async function processTelegramUpdate(update: any) {
             ]);
           }
 
-          await callTelegramApi(token, 'sendMessage', {
-            chat_id: user.id,
-            text: db.config.leaveAlertMessage || '⚠️ You left a required channel/group.\n\nPlease join again and press 🔵 CHECK JOIN.',
-            reply_markup: {
-              inline_keyboard: leaveKeyboard
-            }
-          });
+          const alertMsg = db.config.leaveAlertMessage || '⚠️ You left a required channel/group.\n\nPlease join again and press 🔵 CHECK JOIN.';
+
+          try {
+            await sendTelegramMessageSafe(token, targetUser.id, `🚨 *WARNING: YOU LEFT A REQUIRED CHANNEL!*\n\nChannel: *${matchedChannel.title}*\n\n${alertMsg}`, {
+              parse_mode: 'Markdown',
+              reply_markup: {
+                inline_keyboard: leaveKeyboard
+              }
+            });
+          } catch (sendErr: any) {
+            console.error(`Error sending leave alert to ${targetUser.id}:`, sendErr.message);
+          }
         }
       }
     }
@@ -1838,8 +1950,8 @@ async function processTelegramUpdate(update: any) {
         // 15. Groups-Wise Management
         if (data === 'adm_groupswise') {
           const groupsList = db.channels.map((c, i) =>
-            `${i + 1}. *${c.title || c.name || 'Channel'}* (${(c.type || 'channel').toUpperCase()})\n` +
-            `   • ID: \`${c.channelId || c.chatId}\`\n` +
+            `${i + 1}. *${c.title || (c as any).name || 'Channel'}* (${(c.type || 'channel').toUpperCase()})\n` +
+            `   • ID: \`${c.channelId || (c as any).chatId || c.id}\`\n` +
             `   • Members: *${c.memberCount || 0}*\n` +
             `   • Admin Status: *${c.isBotAdmin ? '✅ Verified Admin' : '⚠️ Not Admin'}*\n` +
             `   • Approval Link: \`${c.inviteLink || 'None'}\``
@@ -1893,7 +2005,29 @@ async function processTelegramUpdate(update: any) {
         const missing: ForceJoinChannel[] = [];
 
         for (const ch of requiredChannels) {
-          const isMember = await checkTelegramChatMember(token, ch.channelId, fromUser.id);
+          let isMember = await checkTelegramChatMember(token, ch.channelId, fromUser.id);
+          if (!isMember) {
+            try {
+              const approveRes = await callTelegramApi(token, 'approveChatJoinRequest', {
+                chat_id: ch.channelId,
+                user_id: fromUser.id
+              });
+              if (approveRes.ok) {
+                isMember = true;
+              } else {
+                const desc = String(approveRes.description || '').toLowerCase();
+                if (desc.includes('already_participant') || desc.includes('already a participant') || desc.includes('already a member')) {
+                  isMember = true;
+                }
+              }
+            } catch {}
+          }
+
+          // If user previously joined / had approval request confirmed and hasn't left
+          if (!isMember && botUser.joinedChannels.includes(ch.id)) {
+            isMember = true;
+          }
+
           if (!isMember) {
             missing.push(ch);
           } else if (!botUser.joinedChannels.includes(ch.id)) {
@@ -1903,19 +2037,20 @@ async function processTelegramUpdate(update: any) {
 
         if (missing.length > 0) {
           botUser.isVerified = false;
-          botUser.hasLeftRequired = true;
           saveDatabase();
 
-          const missingKeyboard: any[] = missing.map((m) => [{
-            text: db.config.joinButtonText || '🔵 JOIN NOW',
-            url: m.inviteLink,
-            style: getTelegramButtonStyle(db.config.joinButtonColor, 'primary')
-          }]);
+          const missingKeyboard: any[] = missing
+            .filter((m) => m.inviteLink && m.inviteLink.startsWith('http'))
+            .map((m) => [{
+              text: db.config.joinButtonText || '🔵 JOIN NOW',
+              url: m.inviteLink,
+              style: getTelegramButtonStyle(db.config.joinButtonColor, 'primary')
+            }]);
           missingKeyboard.push([
             {
               text: db.config.checkJoinButtonText || '🔵 CHECK JOIN',
               callback_data: 'check_in',
-              style: getTelegramButtonStyle(db.config.checkButtonColor, 'primary')
+              style: getTelegramButtonStyle(db.config.checkButtonColor, 'success')
             }
           ]);
           if (db.config.showBonusButton) {
@@ -1928,9 +2063,8 @@ async function processTelegramUpdate(update: any) {
             ]);
           }
 
-          await callTelegramApi(token, 'sendMessage', {
-            chat_id: chatId,
-            text: db.config.leaveAlertMessage || '⚠️ You left a required channel/group.\n\nPlease join again and press 🔵 CHECK JOIN.',
+          await sendTelegramMessageSafe(token, chatId, db.config.welcomeMessage || '⚠️ Complete the required steps below to continue.\n\nPlease join all required channels/groups above and press 🔵 CHECK JOIN.', {
+            parse_mode: 'Markdown',
             reply_markup: { inline_keyboard: missingKeyboard }
           });
           return;
@@ -1945,7 +2079,7 @@ async function processTelegramUpdate(update: any) {
           id: `log-${Date.now()}`,
           timestamp: new Date().toISOString(),
           type: 'verify',
-          user: `${fromUser.first_name} (${fromUser.id})`,
+          user: `${fromUser.first_name || 'User'} (${fromUser.id})`,
           details: 'Real Telegram verification passed! Delivered verification post.'
         });
 
@@ -1988,17 +2122,21 @@ async function processTelegramUpdate(update: any) {
         }
 
         if (db.verificationPost.mediaType === 'image' && db.verificationPost.mediaUrl?.startsWith('http')) {
-          await callTelegramApi(token, 'sendPhoto', {
+          const photoRes = await callTelegramApi(token, 'sendPhoto', {
             chat_id: chatId,
             photo: db.verificationPost.mediaUrl,
             caption: db.verificationPost.text,
             parse_mode: 'Markdown',
             reply_markup: buttons.length > 0 ? { inline_keyboard: buttons } : undefined
           });
+          if (!photoRes.ok) {
+            await sendTelegramMessageSafe(token, chatId, db.verificationPost.text, {
+              parse_mode: 'Markdown',
+              reply_markup: buttons.length > 0 ? { inline_keyboard: buttons } : undefined
+            });
+          }
         } else {
-          await callTelegramApi(token, 'sendMessage', {
-            chat_id: chatId,
-            text: db.verificationPost.text,
+          await sendTelegramMessageSafe(token, chatId, db.verificationPost.text, {
             parse_mode: 'Markdown',
             reply_markup: buttons.length > 0 ? { inline_keyboard: buttons } : undefined
           });
@@ -2014,15 +2152,13 @@ async function processTelegramUpdate(update: any) {
           ? db.config.inviteCustomLink.replace('{bot_ref_link}', refLink)
           : `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${shareText}`;
 
-        await callTelegramApi(token, 'sendMessage', {
-          chat_id: chatId,
-          text: `🎁 *INVITE & EARN REWARDS*\n\n` +
-            `Invite friends and earn *+${db.config.referralBonusAmount} Points* for each verified join!\n\n` +
-            `🔗 *Your Personal Referral Link:*\n\`${refLink}\`\n\n` +
-            `📊 *Your Stats:*\n` +
-            `• Friends Invited: *${botUser.referralCount} Users*\n` +
-            `• Referral Bonus: *${botUser.referralCount * db.config.referralBonusAmount} Points*\n` +
-            `• Current Balance: *${botUser.bonusBalance} Points*`,
+        await sendTelegramMessageSafe(token, chatId, `🎁 *INVITE & EARN REWARDS*\n\n` +
+          `Invite friends and earn *+${db.config.referralBonusAmount} Points* for each verified join!\n\n` +
+          `🔗 *Your Personal Referral Link:*\n\`${refLink}\`\n\n` +
+          `📊 *Your Stats:*\n` +
+          `• Friends Invited: *${botUser.referralCount} Users*\n` +
+          `• Referral Bonus: *${botUser.referralCount * db.config.referralBonusAmount} Points*\n` +
+          `• Current Balance: *${botUser.bonusBalance} Points*`, {
           parse_mode: 'Markdown',
           reply_markup: {
             inline_keyboard: [
@@ -2036,17 +2172,12 @@ async function processTelegramUpdate(update: any) {
 
       if (data === 'view_exclusive') {
         if (!botUser.isVerified || botUser.hasLeftRequired) {
-          await callTelegramApi(token, 'sendMessage', {
-            chat_id: chatId,
-            text: `🔒 *EXCLUSIVE ACCESS LOCKED!*\n\nPlease join all required channels and press 🔵 CHECK JOIN first.\n\n${db.config.leaveAlertMessage}`
-          });
+          await sendTelegramMessageSafe(token, chatId, `🔒 *EXCLUSIVE ACCESS LOCKED!*\n\nPlease join all required channels and press 🔵 CHECK JOIN first.\n\n${db.config.leaveAlertMessage}`);
           return;
         }
 
         const exclusiveUrl = db.config.exclusiveContentUrl || 'https://t.me';
-        await callTelegramApi(token, 'sendMessage', {
-          chat_id: chatId,
-          text: `🔓 *EXCLUSIVE VIP ACCESS UNLOCKED!*\n\nClick the button below to access your exclusive content:`,
+        await sendTelegramMessageSafe(token, chatId, `🔓 *EXCLUSIVE VIP ACCESS UNLOCKED!*\n\nClick the button below to access your exclusive content:`, {
           parse_mode: 'Markdown',
           reply_markup: {
             inline_keyboard: [
@@ -2061,20 +2192,20 @@ async function processTelegramUpdate(update: any) {
         await callTelegramApi(token, 'sendChatAction', { chat_id: chatId, action: 'typing' });
 
         if (!botUser.isVerified || botUser.hasLeftRequired) {
-          const checkBtns: any[] = db.channels.map((c) => [{
-            text: db.config.joinButtonText || '🔵 JOIN NOW',
-            url: c.inviteLink,
-            style: getTelegramButtonStyle(db.config.joinButtonColor, 'primary')
-          }]);
+          const checkBtns: any[] = db.channels
+            .filter((c) => c.inviteLink && c.inviteLink.startsWith('http'))
+            .map((c) => [{
+              text: db.config.joinButtonText || '🔵 JOIN NOW',
+              url: c.inviteLink,
+              style: getTelegramButtonStyle(db.config.joinButtonColor, 'primary')
+            }]);
           checkBtns.push([{
             text: db.config.checkJoinButtonText || '🔵 CHECK JOIN',
             callback_data: 'check_in',
-            style: getTelegramButtonStyle(db.config.checkButtonColor, 'primary')
+            style: getTelegramButtonStyle(db.config.checkButtonColor, 'success')
           }]);
 
-          await callTelegramApi(token, 'sendMessage', {
-            chat_id: chatId,
-            text: db.config.leaveAlertMessage || '⚠️ You left a required channel/group.\n\nPlease join again and press 🔵 CHECK JOIN.',
+          await sendTelegramMessageSafe(token, chatId, db.config.leaveAlertMessage || '⚠️ You left a required channel/group.\n\nPlease join again and press 🔵 CHECK JOIN.', {
             reply_markup: {
               inline_keyboard: checkBtns
             }
@@ -3042,23 +3173,14 @@ async function processTelegramUpdate(update: any) {
             verifiedButtons.push([{ text: db.verificationPost.secondaryButtonText, url: db.verificationPost.secondaryButtonUrl, style: 'primary' }]);
           }
 
-          const vRes = await callTelegramApi(token, 'sendMessage', {
-            chat_id: chatId,
-            text: `🎉 *WELCOME BACK, ${fromUser?.first_name || 'Member'}!*\n\n` +
-              `✅ *Status:* You are already verified in all official channels!\n\n` +
-              `🎁 *Redeem Claim Code:* Type \`/claim <CODE>\` to unlock secret links.\n` +
-              `👥 *Referral Code:* \`${botUser.referralCode || `ref_${fromUser?.id}`}\`\n` +
-              `💰 *Bonus Balance:* ₹${botUser.bonusBalance || 0}`,
+          await sendTelegramMessageSafe(token, chatId, `🎉 *WELCOME BACK, ${fromUser?.first_name || 'Member'}!*\n\n` +
+            `✅ *Status:* You are already verified in all official channels!\n\n` +
+            `🎁 *Redeem Claim Code:* Type \`/claim <CODE>\` to unlock secret links.\n` +
+            `👥 *Referral Code:* \`${botUser.referralCode || `ref_${fromUser?.id}`}\`\n` +
+            `💰 *Bonus Balance:* ₹${botUser.bonusBalance || 0}`, {
             parse_mode: 'Markdown',
             reply_markup: verifiedButtons.length > 0 ? { inline_keyboard: verifiedButtons } : undefined
           });
-
-          if (!vRes.ok) {
-            await callTelegramApi(token, 'sendMessage', {
-              chat_id: chatId,
-              text: `🎉 Welcome back! You are verified in all channels.\nType /claim <CODE> to unlock your secret links.`
-            });
-          }
           return;
         }
 
@@ -3090,46 +3212,31 @@ async function processTelegramUpdate(update: any) {
           ]);
         }
 
-        let startRes = await callTelegramApi(token, 'sendMessage', {
-          chat_id: chatId,
-          text: db.config.welcomeMessage || '⚠️ You left a required channel/group.\n\nPlease join again and press 🔵 CHECK JOIN.',
+        const welcomeText = db.config.welcomeMessage || "🎉 hey 👋 I'm your Receptionist,\n\n=>Your First Task WELCOME BONUS ₹1080\n\nWelcome! Complete the required steps below to continue.\n\n🔒 Step 1: Join all required channels/groups.\n\nAfter joining, press 🔵 CHECK JOIN.";
+
+        await sendTelegramMessageSafe(token, chatId, welcomeText, {
           parse_mode: 'Markdown',
           reply_markup: {
             inline_keyboard: channelButtons
           }
         });
-
-        // Fail-safe fallback if markdown parsing fails
-        if (!startRes.ok) {
-          startRes = await callTelegramApi(token, 'sendMessage', {
-            chat_id: chatId,
-            text: db.config.welcomeMessage || '⚠️ You left a required channel/group.\n\nPlease join again and press 🔵 CHECK JOIN.',
-            reply_markup: {
-              inline_keyboard: channelButtons
-            }
-          });
-        }
         return;
       }
 
       // Handle Admin /over <code> or /expire <code> (1-click mark link as OVER on all users' screens)
       if ((text.startsWith('/over') || text.startsWith('/expire')) && isAdmin) {
-        const targetCode = text.replace(/^\/(over|expire)/, '').trim();
+        const targetCode = text.replace(/^\/(over|expire)(@\w+)?/i, '').trim();
         if (!targetCode) {
-          await callTelegramApi(token, 'sendMessage', {
-            chat_id: chatId,
-            text: `⚠️ *Usage:* \`/over <CODE>\`\n\nExample: \`/over VIP2026\`\n(Yeh command sabhi users ke message me link ko replace karke *OVER ❌* likh dega!)`,
+          await sendTelegramMessageSafe(token, chatId, `⚠️ *Usage:* \`/over <CODE>\`\n\nExample: \`/over VIP2026\`\n(Yeh command sabhi users ke message me link ko replace karke *OVER ❌* likh dega!)`, {
             parse_mode: 'Markdown'
           });
           return;
         }
 
         const overRes = await markClaimCodeOver(targetCode, 'over');
-        await callTelegramApi(token, 'sendMessage', {
-          chat_id: chatId,
-          text: overRes.success
-            ? `✅ *CODE MARKED OVER ❌!*\n\n${overRes.message}`
-            : `❌ *Error:* ${overRes.message}`,
+        await sendTelegramMessageSafe(token, chatId, overRes.success
+          ? `✅ *CODE MARKED OVER ❌!*\n\n${overRes.message}`
+          : `❌ *Error:* ${overRes.message}`, {
           parse_mode: 'Markdown'
         });
         return;
@@ -3137,32 +3244,38 @@ async function processTelegramUpdate(update: any) {
 
       // Handle Admin /delmsg <code> or /delover <code> (Delete sent message from users' chats)
       if ((text.startsWith('/delmsg') || text.startsWith('/delover')) && isAdmin) {
-        const targetCode = text.replace(/^\/(delmsg|delover)/, '').trim();
+        const targetCode = text.replace(/^\/(delmsg|delover)(@\w+)?/i, '').trim();
         if (!targetCode) {
-          await callTelegramApi(token, 'sendMessage', {
-            chat_id: chatId,
-            text: `⚠️ *Usage:* \`/delmsg <CODE>\`\n\nExample: \`/delmsg VIP2026\`\n(Yeh command sabhi users ke phone se us code ka message delete kar dega!)`,
+          await sendTelegramMessageSafe(token, chatId, `⚠️ *Usage:* \`/delmsg <CODE>\`\n\nExample: \`/delmsg VIP2026\`\n(Yeh command sabhi users ke phone se us code ka message delete kar dega!)`, {
             parse_mode: 'Markdown'
           });
           return;
         }
 
         const delRes = await markClaimCodeOver(targetCode, 'delete');
-        await callTelegramApi(token, 'sendMessage', {
-          chat_id: chatId,
-          text: delRes.success
-            ? `🗑️ *SENT MESSAGES DELETED!*\n\n${delRes.message}`
-            : `❌ *Error:* ${delRes.message}`,
+        await sendTelegramMessageSafe(token, chatId, delRes.success
+          ? `🗑️ *SENT MESSAGES DELETED!*\n\n${delRes.message}`
+          : `❌ *Error:* ${delRes.message}`, {
           parse_mode: 'Markdown'
         });
         return;
       }
 
       // Handle /claim <CODE> or entering code directly
-      let codeQuery = text;
-      if (codeQuery.startsWith('/claim')) {
-        codeQuery = codeQuery.replace('/claim', '').trim();
+      let codeQuery = text.trim();
+      const isClaimCommand = /^\/claim(@\w+)?/i.test(codeQuery);
+      if (isClaimCommand) {
+        codeQuery = codeQuery.replace(/^\/claim(@\w+)?/i, '').trim();
       }
+
+      // If user typed just /claim without code
+      if (isClaimCommand && !codeQuery) {
+        await sendTelegramMessageSafe(token, chatId, `🎁 *HOW TO CLAIM REWARD*\n\nPlease enter your claim code with the /claim command:\n\n👉 \`/claim <CODE>\`\n\nExample: \`/claim VIP2026\`\n\nOr click on any code drop shared in our official channels!`, {
+          parse_mode: 'Markdown'
+        });
+        return;
+      }
+
       codeQuery = codeQuery.toUpperCase();
 
       const matchedCode = db.claimCodes.find((c) => c.code.toUpperCase() === codeQuery);
@@ -3186,9 +3299,7 @@ async function processTelegramUpdate(update: any) {
             style: getTelegramButtonStyle(db.config.checkButtonColor, 'success')
           }]);
 
-          await callTelegramApi(token, 'sendMessage', {
-            chat_id: chatId,
-            text: db.config.leaveAlertMessage || '⚠️ You left a required channel/group.\n\nPlease join again and press 🔵 CHECK JOIN.',
+          await sendTelegramMessageSafe(token, chatId, db.config.leaveAlertMessage || '⚠️ You left a required channel/group.\n\nPlease join again and press 🔵 CHECK JOIN.', {
             reply_markup: {
               inline_keyboard: checkBtns
             }
@@ -3198,18 +3309,14 @@ async function processTelegramUpdate(update: any) {
 
         // Check if code has been marked as OVER ❌
         if (matchedCode.isOver) {
-          await callTelegramApi(token, 'sendMessage', {
-            chat_id: chatId,
-            text: `❌ *THIS CODE IS OVER ❌*\n\nSorry, this claim code *${codeQuery}* is closed and the link is now *OVER ❌*.\nPlease stay tuned for new codes!`,
+          await sendTelegramMessageSafe(token, chatId, `❌ *THIS CODE IS OVER ❌*\n\nSorry, this claim code *${codeQuery}* is closed and the link is now *OVER ❌*.\nPlease stay tuned for new codes!`, {
             parse_mode: 'Markdown'
           });
           return;
         }
 
         if (botUser.claimedCodes.includes(codeQuery)) {
-          await callTelegramApi(token, 'sendMessage', {
-            chat_id: chatId,
-            text: `ℹ️ *ALREADY REDEEMED!*\n\nYou have already redeemed the claim code *${codeQuery}*.`,
+          await sendTelegramMessageSafe(token, chatId, `ℹ️ *ALREADY REDEEMED!*\n\nYou have already redeemed the claim code *${codeQuery}*.`, {
             parse_mode: 'Markdown'
           });
           return;
@@ -3240,26 +3347,15 @@ async function processTelegramUpdate(update: any) {
             reply_markup: codeButtons.length > 0 ? { inline_keyboard: codeButtons } : undefined
           });
           if (!sentMsgRes.ok) {
-            sentMsgRes = await callTelegramApi(token, 'sendMessage', {
-              chat_id: chatId,
-              text: `🎉 CODE UNLOCKED: ${matchedCode.code}\n\n${matchedCode.postContent.text}`,
+            sentMsgRes = await sendTelegramMessageSafe(token, chatId, `🎉 CODE UNLOCKED: ${matchedCode.code}\n\n${matchedCode.postContent.text}`, {
               reply_markup: codeButtons.length > 0 ? { inline_keyboard: codeButtons } : undefined
             });
           }
         } else {
-          sentMsgRes = await callTelegramApi(token, 'sendMessage', {
-            chat_id: chatId,
-            text: rewardText,
+          sentMsgRes = await sendTelegramMessageSafe(token, chatId, rewardText, {
             parse_mode: 'Markdown',
             reply_markup: codeButtons.length > 0 ? { inline_keyboard: codeButtons } : undefined
           });
-          if (!sentMsgRes.ok) {
-            sentMsgRes = await callTelegramApi(token, 'sendMessage', {
-              chat_id: chatId,
-              text: `🎉 CODE UNLOCKED: ${matchedCode.code}\n\n${matchedCode.postContent.text}`,
-              reply_markup: codeButtons.length > 0 ? { inline_keyboard: codeButtons } : undefined
-            });
-          }
         }
 
         // Save delivery record to enable 1-click OVER ❌ and automatic timed link removal on user screens
@@ -3276,16 +3372,14 @@ async function processTelegramUpdate(update: any) {
       }
 
       // If text started with /claim but code wasn't matched
-      if (text.startsWith('/claim')) {
-        await callTelegramApi(token, 'sendMessage', {
-          chat_id: chatId,
-          text: `❌ *CLAIM CODE NOT FOUND OR EXPIRED*\n\nThe code "${codeQuery}" was not found or has expired.\n\n💡 *Tip:* Please check the code spelling or wait for the next code drop in our official channels!`,
+      if (isClaimCommand) {
+        await sendTelegramMessageSafe(token, chatId, `❌ *CLAIM CODE NOT FOUND OR EXPIRED*\n\nThe code "${codeQuery}" was not found or has expired.\n\n💡 *Tip:* Please check the code spelling or wait for the next code drop in our official channels!`, {
           parse_mode: 'Markdown'
         });
         return;
       }
 
-      // Default fallback: show clean screenshot layout with Blue & Red buttons
+      // Default fallback: show clean screenshot layout with Blue & Green buttons
       const defaultBtns: any[] = db.channels
         .filter((c) => c.inviteLink && c.inviteLink.startsWith('http'))
         .map((ch) => [
@@ -3302,9 +3396,8 @@ async function processTelegramUpdate(update: any) {
           style: getTelegramButtonStyle(db.config.checkButtonColor, 'success')
         }
       ]);
-      await callTelegramApi(token, 'sendMessage', {
-        chat_id: chatId,
-        text: db.config.welcomeMessage || '⚠️ You left a required channel/group.\n\nPlease join again and press 🔵 CHECK JOIN.',
+      await sendTelegramMessageSafe(token, chatId, db.config.welcomeMessage || '⚠️ Welcome! Complete the required steps below to continue.\n\nPlease join all required channels/groups above and press 🔵 CHECK JOIN.', {
+        parse_mode: 'Markdown',
         reply_markup: {
           inline_keyboard: defaultBtns
         }
@@ -3339,7 +3432,11 @@ async function restartAndFixBotPolling(): Promise<{ ok: boolean; message: string
 
     // 3. Clear any 409 conflict by getting the latest update ID
     try {
-      const testUpdates = await callTelegramApi(token, 'getUpdates', { offset: -1, timeout: 1 });
+      const testUpdates = await callTelegramApi(token, 'getUpdates', { 
+        offset: -1, 
+        timeout: 1,
+        allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member', 'chat_join_request']
+      });
       if (testUpdates.ok && Array.isArray(testUpdates.result) && testUpdates.result.length > 0) {
         lastUpdateId = testUpdates.result[testUpdates.result.length - 1].update_id;
       }
@@ -3387,7 +3484,7 @@ async function runTelegramPolling() {
     const res = await callTelegramApi(token, 'getUpdates', {
       offset: lastUpdateId + 1,
       timeout: 10,
-      allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member']
+      allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member', 'chat_join_request']
     });
 
     if (res.ok && Array.isArray(res.result)) {

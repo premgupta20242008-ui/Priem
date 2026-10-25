@@ -1263,7 +1263,7 @@ export const TelegramSimulator: React.FC<TelegramSimulatorProps> = ({
         const groupsSummary = channels
           .map(
             (c, i) =>
-              `${i + 1}. *${c.name}* (${c.type.toUpperCase()})\n   • ID: \`${c.chatId}\`\n   • Members: *${c.membersCount || 240}*\n   • Admin Required: *✅ Verified Admin*\n   • Approval Link: \`${c.inviteLink}\``
+              `${i + 1}. *${c.title || (c as any).name || 'Channel'}* (${c.type.toUpperCase()})\n   • ID: \`${c.channelId || (c as any).chatId || c.id}\`\n   • Members: *${c.memberCount || 240}*\n   • Admin Required: *✅ Verified Admin*\n   • Approval Link: \`${c.inviteLink}\``
           )
           .join('\n\n');
 
@@ -1284,7 +1284,7 @@ export const TelegramSimulator: React.FC<TelegramSimulatorProps> = ({
       if (text.startsWith('/setinvite')) {
         const newInvite = text.replace('/setinvite', '').trim();
         if (newInvite && onUpdateConfig) {
-          await onUpdateConfig({ customInviteLink: newInvite });
+          await onUpdateConfig({ inviteCustomLink: newInvite });
         }
         setMessages((prev) => [
           ...prev,
