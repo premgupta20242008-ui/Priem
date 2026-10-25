@@ -458,11 +458,13 @@ async function createChatApprovalInviteLink(token: string, chatId: string, name 
   }
 }
 
-// Helper to get Telegram Bot API 9.4 button styles
+// Helper to get Telegram Bot API button styles (primary = blue, success = green, danger = red)
 function getTelegramButtonStyle(color?: string, fallback: 'primary' | 'danger' | 'success' = 'primary'): 'primary' | 'danger' | 'success' {
-  if (color === 'red') return 'danger';
-  if (color === 'green') return 'success';
-  if (color === 'blue') return 'primary';
+  if (!color) return fallback;
+  const c = color.toLowerCase().trim();
+  if (c === 'red' || c === 'danger') return 'danger';
+  if (c === 'green' || c === 'success') return 'success';
+  if (c === 'blue' || c === 'cyan' || c === 'indigo' || c === 'primary') return 'primary';
   return fallback;
 }
 
@@ -3034,10 +3036,10 @@ async function processTelegramUpdate(update: any) {
         if (botUser.isVerified && !botUser.hasLeftRequired) {
           const verifiedButtons: any[] = [];
           if (db.verificationPost.buttonText && db.verificationPost.buttonUrl && db.verificationPost.buttonUrl.startsWith('http')) {
-            verifiedButtons.push([{ text: db.verificationPost.buttonText, url: db.verificationPost.buttonUrl }]);
+            verifiedButtons.push([{ text: db.verificationPost.buttonText, url: db.verificationPost.buttonUrl, style: 'success' }]);
           }
           if (db.verificationPost.secondaryButtonText && db.verificationPost.secondaryButtonUrl && db.verificationPost.secondaryButtonUrl.startsWith('http')) {
-            verifiedButtons.push([{ text: db.verificationPost.secondaryButtonText, url: db.verificationPost.secondaryButtonUrl }]);
+            verifiedButtons.push([{ text: db.verificationPost.secondaryButtonText, url: db.verificationPost.secondaryButtonUrl, style: 'primary' }]);
           }
 
           const vRes = await callTelegramApi(token, 'sendMessage', {
@@ -3060,19 +3062,21 @@ async function processTelegramUpdate(update: any) {
           return;
         }
 
-        // User is not verified: build force-join channels
+        // User is not verified: build force-join channels with colorful buttons
         const validChannels = db.channels.filter((c) => c.inviteLink && c.inviteLink.startsWith('http'));
         const channelButtons: any[] = validChannels.map((ch) => [
           {
             text: db.config.joinButtonText || '🔵 JOIN NOW',
-            url: ch.inviteLink
+            url: ch.inviteLink,
+            style: getTelegramButtonStyle(db.config.joinButtonColor, 'primary')
           }
         ]);
 
         channelButtons.push([
           {
             text: db.config.checkJoinButtonText || '🔵 CHECK JOIN',
-            callback_data: 'check_in'
+            callback_data: 'check_in',
+            style: getTelegramButtonStyle(db.config.checkButtonColor, 'success')
           }
         ]);
 
@@ -3080,25 +3084,29 @@ async function processTelegramUpdate(update: any) {
           channelButtons.push([
             {
               text: db.config.bonusButtonText || '🔴 CLAIM BONUS',
-              callback_data: 'claim_bonus'
+              callback_data: 'claim_bonus',
+              style: getTelegramButtonStyle(db.config.bonusButtonColor, 'danger')
             }
           ]);
         }
 
-        const startRes = await callTelegramApi(token, 'sendMessage', {
+        let startRes = await callTelegramApi(token, 'sendMessage', {
           chat_id: chatId,
           text: db.config.welcomeMessage || '⚠️ You left a required channel/group.\n\nPlease join again and press 🔵 CHECK JOIN.',
+          parse_mode: 'Markdown',
           reply_markup: {
             inline_keyboard: channelButtons
           }
         });
 
-        // Fail-safe plain text fallback if custom markup fails
+        // Fail-safe fallback if markdown parsing fails
         if (!startRes.ok) {
-          await callTelegramApi(token, 'sendMessage', {
+          startRes = await callTelegramApi(token, 'sendMessage', {
             chat_id: chatId,
-            text: `${db.config.welcomeMessage || 'Welcome!'}\n\nPlease join our channels:\n` +
-              validChannels.map((c, i) => `${i + 1}. ${c.title || c.name}: ${c.inviteLink}`).join('\n')
+            text: db.config.welcomeMessage || '⚠️ You left a required channel/group.\n\nPlease join again and press 🔵 CHECK JOIN.',
+            reply_markup: {
+              inline_keyboard: channelButtons
+            }
           });
         }
         return;
@@ -3169,11 +3177,13 @@ async function processTelegramUpdate(update: any) {
             .filter((c) => c.inviteLink && c.inviteLink.startsWith('http'))
             .map((c) => [{
               text: db.config.joinButtonText || '🔵 JOIN NOW',
-              url: c.inviteLink
+              url: c.inviteLink,
+              style: getTelegramButtonStyle(db.config.joinButtonColor, 'primary')
             }]);
           checkBtns.push([{
             text: db.config.checkJoinButtonText || '🔵 CHECK JOIN',
-            callback_data: 'check_in'
+            callback_data: 'check_in',
+            style: getTelegramButtonStyle(db.config.checkButtonColor, 'success')
           }]);
 
           await callTelegramApi(token, 'sendMessage', {
@@ -3281,13 +3291,15 @@ async function processTelegramUpdate(update: any) {
         .map((ch) => [
           {
             text: db.config.joinButtonText || '🔵 JOIN NOW',
-            url: ch.inviteLink
+            url: ch.inviteLink,
+            style: getTelegramButtonStyle(db.config.joinButtonColor, 'primary')
           }
         ]);
       defaultBtns.push([
         {
           text: db.config.checkJoinButtonText || '🔵 CHECK JOIN',
-          callback_data: 'check_in'
+          callback_data: 'check_in',
+          style: getTelegramButtonStyle(db.config.checkButtonColor, 'success')
         }
       ]);
       await callTelegramApi(token, 'sendMessage', {
