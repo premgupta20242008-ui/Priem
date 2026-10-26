@@ -13,6 +13,7 @@ export interface ForceJoinChannel {
   adminCheckStatus?: 'verified' | 'not_admin' | 'error' | 'pending';
   isApprovalLink?: boolean;
   approvalLinkCreated?: string;
+  autoApprove?: boolean; // Toggle auto-approval per channel
 }
 
 export interface PostPayload {
@@ -32,6 +33,7 @@ export interface SentCodeMessage {
   deliveredAt: string;
   isOver?: boolean;
   isDeleted?: boolean;
+  isEdited?: boolean;
 }
 
 export interface ClaimCode {
@@ -78,6 +80,10 @@ export interface BroadcastMessage {
   totalRecipients: number;
   createdAt: string;
   executedAt?: string;
+  sentMessages?: SentCodeMessage[];
+  isDeletedFromUsers?: boolean;
+  deletedFromUsersCount?: number;
+  isEditedOnUsers?: boolean;
 }
 
 export interface AdminUser {
@@ -136,6 +142,7 @@ export interface BotConfig {
   botUsername: string;
   botName: string;
   isPollingActive: boolean;
+  autoApproveJoinRequests?: boolean; // Global toggle: true = Instant Auto-Approve, false = Manual Admin Review
   welcomeMessage: string;
   leaveAlertMessage: string;
   joinButtonText: string;

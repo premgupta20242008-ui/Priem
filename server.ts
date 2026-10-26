@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import type {
   ForceJoinChannel,
   ClaimCode,
+  SentCodeMessage,
   VerificationPost,
   BroadcastMessage,
   AdminUser,
@@ -447,7 +448,7 @@ async function sendTelegramMessageSafe(
 }
 
 // Real Telegram API helper to check if a user is a member of a channel/group
-async function checkTelegramChatMember(token: string, chatId: string, userId: number | string): Promise<boolean> {
+async function checkTelegramChatMember(token: string, chatId: string, userId: number | string, autoApprove = true): Promise<boolean> {
   try {
     const res = await callTelegramApi(token, 'getChatMember', {
       chat_id: chatId,
@@ -460,17 +461,19 @@ async function checkTelegramChatMember(token: string, chatId: string, userId: nu
       }
     }
 
-    // Auto-approve pending join request if user submitted a request via bot approval link
-    const approveRes = await callTelegramApi(token, 'approveChatJoinRequest', {
-      chat_id: chatId,
-      user_id: userId
-    });
-    if (approveRes.ok) {
-      return true;
-    }
-    const desc = String(approveRes.description || '').toLowerCase();
-    if (desc.includes('already_participant') || desc.includes('already a participant') || desc.includes('already a member')) {
-      return true;
+    // Only auto-approve if autoApprove is enabled
+    if (autoApprove) {
+      const approveRes = await callTelegramApi(token, 'approveChatJoinRequest', {
+        chat_id: chatId,
+        user_id: userId
+      });
+      if (approveRes.ok) {
+        return true;
+      }
+      const desc = String(approveRes.description || '').toLowerCase();
+      if (desc.includes('already_participant') || desc.includes('already a participant') || desc.includes('already a member')) {
+        return true;
+      }
     }
 
     return false;
@@ -773,9 +776,10 @@ async function dispatchCopyBroadcastToUsers(
   recipients: BotUser[],
   fromChatId: number | string,
   messageId: number
-): Promise<{ sent: number; failed: number }> {
+): Promise<{ sent: number; failed: number; sentMessages: SentCodeMessage[] }> {
   let sent = 0;
   let failed = 0;
+  const sentMessages: SentCodeMessage[] = [];
 
   for (const user of recipients) {
     try {
@@ -784,15 +788,26 @@ async function dispatchCopyBroadcastToUsers(
         from_chat_id: fromChatId,
         message_id: messageId
       });
-      if (r.ok) sent++;
-      else failed++;
+      if (r.ok && r.result?.message_id) {
+        sent++;
+        sentMessages.push({
+          telegramId: user.telegramId,
+          chatId: user.telegramId,
+          messageId: r.result.message_id,
+          deliveredAt: new Date().toISOString()
+        });
+      } else if (r.ok) {
+        sent++;
+      } else {
+        failed++;
+      }
     } catch {
       failed++;
     }
     // Rate limit delay between Telegram messages
     await new Promise((resolve) => setTimeout(resolve, 35));
   }
-  return { sent, failed };
+  return { sent, failed, sentMessages };
 }
 
 // Real Telegram Message Dispatcher with rate limiting (35ms delay between sends to prevent 429)
@@ -800,9 +815,10 @@ async function dispatchBroadcastToUsers(
   token: string,
   recipients: BotUser[],
   content: { text: string; mediaType?: string; mediaUrl?: string; buttonText?: string; buttonUrl?: string }
-): Promise<{ sent: number; failed: number }> {
+): Promise<{ sent: number; failed: number; sentMessages: SentCodeMessage[] }> {
   let sent = 0;
   let failed = 0;
+  const sentMessages: SentCodeMessage[] = [];
 
   const buttons: any[] = [];
   if (content.buttonText && content.buttonUrl) {
@@ -812,24 +828,49 @@ async function dispatchBroadcastToUsers(
   for (const user of recipients) {
     try {
       if (content.mediaType === 'image' && content.mediaUrl?.startsWith('http')) {
-        const r = await callTelegramApi(token, 'sendPhoto', {
+        let r = await callTelegramApi(token, 'sendPhoto', {
           chat_id: user.telegramId,
           photo: content.mediaUrl,
           caption: content.text,
           parse_mode: 'Markdown',
           reply_markup: buttons.length > 0 ? { inline_keyboard: buttons } : undefined
         });
-        if (r.ok) sent++;
-        else failed++;
+        if (!r.ok) {
+          r = await sendTelegramMessageSafe(token, user.telegramId, content.text, {
+            reply_markup: buttons.length > 0 ? { inline_keyboard: buttons } : undefined
+          });
+        }
+        if (r.ok && r.result?.message_id) {
+          sent++;
+          sentMessages.push({
+            telegramId: user.telegramId,
+            chatId: user.telegramId,
+            messageId: r.result.message_id,
+            deliveredAt: new Date().toISOString()
+          });
+        } else if (r.ok) {
+          sent++;
+        } else {
+          failed++;
+        }
       } else {
-        const r = await callTelegramApi(token, 'sendMessage', {
-          chat_id: user.telegramId,
-          text: content.text,
+        const r = await sendTelegramMessageSafe(token, user.telegramId, content.text, {
           parse_mode: 'Markdown',
           reply_markup: buttons.length > 0 ? { inline_keyboard: buttons } : undefined
         });
-        if (r.ok) sent++;
-        else failed++;
+        if (r.ok && r.result?.message_id) {
+          sent++;
+          sentMessages.push({
+            telegramId: user.telegramId,
+            chatId: user.telegramId,
+            messageId: r.result.message_id,
+            deliveredAt: new Date().toISOString()
+          });
+        } else if (r.ok) {
+          sent++;
+        } else {
+          failed++;
+        }
       }
     } catch {
       failed++;
@@ -838,7 +879,191 @@ async function dispatchBroadcastToUsers(
     await new Promise((resolve) => setTimeout(resolve, 35));
   }
 
-  return { sent, failed };
+  return { sent, failed, sentMessages };
+}
+
+// Engine to DELETE an entire broadcast message from all recipients' Telegram screens
+async function deleteBroadcastFromUsers(
+  broadcastIdOrKeyword: string = 'last'
+): Promise<{ success: boolean; affectedUsers: number; message: string; broadcast?: BroadcastMessage }> {
+  let broadcast: BroadcastMessage | undefined;
+  if (!broadcastIdOrKeyword || broadcastIdOrKeyword === 'last') {
+    broadcast = db.broadcasts.find((b) => b.status === 'sent' && b.sentMessages && b.sentMessages.length > 0) || db.broadcasts[0];
+  } else {
+    broadcast = db.broadcasts.find(
+      (b) => b.id === broadcastIdOrKeyword || b.title.toLowerCase().includes(broadcastIdOrKeyword.toLowerCase())
+    );
+  }
+
+  if (!broadcast) {
+    return { success: false, affectedUsers: 0, message: 'Broadcast not found.' };
+  }
+
+  const token = db.config.botToken;
+  if (!token || !broadcast.sentMessages || broadcast.sentMessages.length === 0) {
+    return {
+      success: false,
+      affectedUsers: 0,
+      message: `Broadcast "${broadcast.title}" has no tracked user messages to delete.`
+    };
+  }
+
+  let count = 0;
+  for (const item of broadcast.sentMessages) {
+    if (item.isDeleted) continue;
+    try {
+      const delRes = await callTelegramApi(token, 'deleteMessage', {
+        chat_id: item.chatId,
+        message_id: item.messageId
+      });
+      if (delRes.ok) {
+        item.isDeleted = true;
+        count++;
+      }
+    } catch {}
+    await new Promise((r) => setTimeout(r, 35));
+  }
+
+  broadcast.isDeletedFromUsers = true;
+  broadcast.deletedFromUsersCount = (broadcast.deletedFromUsersCount || 0) + count;
+  saveDatabase();
+
+  db.logs.unshift({
+    id: `log-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    type: 'broadcast',
+    user: 'Broadcast Deletion Engine',
+    details: `Deleted broadcast "${broadcast.title}" (${broadcast.id}) from ${count} users' Telegram chats!`
+  });
+
+  return {
+    success: true,
+    affectedUsers: count,
+    message: `Broadcast deleted from ${count} users' Telegram screens!`,
+    broadcast
+  };
+}
+
+// Engine to EDIT or REPLACE text/links in an already sent broadcast across all recipients
+async function editBroadcastOnUsers(
+  broadcastIdOrKeyword: string = 'last',
+  options: {
+    newText?: string;
+    replaceOldUrl?: string;
+    replaceNewUrl?: string;
+    newButtonText?: string;
+    newButtonUrl?: string;
+  }
+): Promise<{ success: boolean; affectedUsers: number; message: string; broadcast?: BroadcastMessage }> {
+  let broadcast: BroadcastMessage | undefined;
+  if (!broadcastIdOrKeyword || broadcastIdOrKeyword === 'last') {
+    broadcast = db.broadcasts.find((b) => b.status === 'sent' && b.sentMessages && b.sentMessages.length > 0) || db.broadcasts[0];
+  } else {
+    broadcast = db.broadcasts.find(
+      (b) => b.id === broadcastIdOrKeyword || b.title.toLowerCase().includes(broadcastIdOrKeyword.toLowerCase())
+    );
+  }
+
+  if (!broadcast) {
+    return { success: false, affectedUsers: 0, message: 'Broadcast not found.' };
+  }
+
+  const token = db.config.botToken;
+  if (!token || !broadcast.sentMessages || broadcast.sentMessages.length === 0) {
+    return {
+      success: false,
+      affectedUsers: 0,
+      message: `Broadcast "${broadcast.title}" has no tracked user messages to edit.`
+    };
+  }
+
+  // Calculate new text
+  let updatedText = options.newText !== undefined ? options.newText : broadcast.postContent.text;
+  if (options.replaceOldUrl && options.replaceNewUrl) {
+    updatedText = updatedText.split(options.replaceOldUrl).join(options.replaceNewUrl);
+  }
+
+  // Calculate buttons
+  let buttonText = options.newButtonText !== undefined ? options.newButtonText : broadcast.postContent.buttonText;
+  let buttonUrl = options.newButtonUrl !== undefined ? options.newButtonUrl : broadcast.postContent.buttonUrl;
+  if (options.replaceOldUrl && options.replaceNewUrl && buttonUrl === options.replaceOldUrl) {
+    buttonUrl = options.replaceNewUrl;
+  }
+
+  const buttons: any[] = [];
+  if (buttonText && buttonUrl) {
+    buttons.push([{ text: buttonText, url: buttonUrl }]);
+  }
+
+  let count = 0;
+  const isImage = broadcast.postContent.mediaType === 'image';
+
+  for (const item of broadcast.sentMessages) {
+    if (item.isDeleted) continue;
+    try {
+      let editRes: any;
+      if (isImage) {
+        editRes = await callTelegramApi(token, 'editMessageCaption', {
+          chat_id: item.chatId,
+          message_id: item.messageId,
+          caption: updatedText,
+          parse_mode: 'Markdown',
+          reply_markup: buttons.length > 0 ? { inline_keyboard: buttons } : undefined
+        });
+        if (!editRes.ok) {
+          editRes = await callTelegramApi(token, 'editMessageCaption', {
+            chat_id: item.chatId,
+            message_id: item.messageId,
+            caption: updatedText,
+            reply_markup: buttons.length > 0 ? { inline_keyboard: buttons } : undefined
+          });
+        }
+      } else {
+        editRes = await callTelegramApi(token, 'editMessageText', {
+          chat_id: item.chatId,
+          message_id: item.messageId,
+          text: updatedText,
+          parse_mode: 'Markdown',
+          reply_markup: buttons.length > 0 ? { inline_keyboard: buttons } : undefined
+        });
+        if (!editRes.ok) {
+          editRes = await callTelegramApi(token, 'editMessageText', {
+            chat_id: item.chatId,
+            message_id: item.messageId,
+            text: updatedText,
+            reply_markup: buttons.length > 0 ? { inline_keyboard: buttons } : undefined
+          });
+        }
+      }
+
+      if (editRes.ok) {
+        item.isEdited = true;
+        count++;
+      }
+    } catch {}
+    await new Promise((r) => setTimeout(r, 35));
+  }
+
+  broadcast.postContent.text = updatedText;
+  if (buttonText !== undefined) broadcast.postContent.buttonText = buttonText;
+  if (buttonUrl !== undefined) broadcast.postContent.buttonUrl = buttonUrl;
+  broadcast.isEditedOnUsers = true;
+  saveDatabase();
+
+  db.logs.unshift({
+    id: `log-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    type: 'broadcast',
+    user: 'Broadcast Edit Engine',
+    details: `Edited / replaced content in broadcast "${broadcast.title}" (${broadcast.id}) on ${count} users' Telegram chats!`
+  });
+
+  return {
+    success: true,
+    affectedUsers: count,
+    message: `Updated broadcast content across ${count} users' screens!`,
+    broadcast
+  };
 }
 
 // Engine to mark a claim code as OVER ❌ or DELETE messages from users' Telegram screens
@@ -959,65 +1184,93 @@ async function processTelegramUpdate(update: any) {
       const cjr = update.chat_join_request;
       const user = cjr.from;
       const chat = cjr.chat;
-
-      // Auto-approve user join request using Telegram API
-      await callTelegramApi(token, 'approveChatJoinRequest', {
-        chat_id: chat.id,
-        user_id: user.id
-      });
-
-      let botUser = db.users.find((u) => u.telegramId === String(user.id));
-      if (!botUser) {
-        botUser = {
-          telegramId: String(user.id),
-          username: user.username || '',
-          firstName: user.first_name || 'User',
-          isVerified: false,
-          joinedChannels: [],
-          joinedAt: new Date().toISOString(),
-          lastActiveAt: new Date().toISOString(),
-          hasLeftRequired: false,
-          leftChannelsAlertCount: 0,
-          referralCode: `ref_${user.id}`,
-          referralCount: 0,
-          bonusBalance: 0,
-          claimedCodes: []
-        };
-        db.users.push(botUser);
-      }
-
       const matchedChannel = db.channels.find((c) => isChannelMatch(c, chat));
-      if (matchedChannel && !botUser.joinedChannels.includes(matchedChannel.id)) {
-        botUser.joinedChannels.push(matchedChannel.id);
-      }
 
-      // Check if all required channels are fulfilled
-      const requiredChannels = db.channels.filter((c) => c.required);
-      if (requiredChannels.length > 0 && requiredChannels.every((c) => botUser.joinedChannels.includes(c.id))) {
-        botUser.hasLeftRequired = false;
-      }
+      const isAutoApprove = (matchedChannel as any)?.autoApprove !== undefined
+        ? (matchedChannel as any).autoApprove
+        : (db.config.autoApproveJoinRequests !== false);
 
-      saveDatabase();
-
-      db.logs.unshift({
-        id: `log-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        type: 'join',
-        user: `${user.first_name || 'User'} (${user.id})`,
-        details: `Auto-approved join request for ${chat.title || chat.username || chat.id} created by bot approval link!`
-      });
-
-      try {
-        await sendTelegramMessageSafe(token, user.id, `🎉 *JOIN REQUEST APPROVED!*\n\nYour request to join *${chat.title || 'Official Channel'}* has been automatically approved!\n\nPlease return to the bot and press 🔵 CHECK JOIN to verify and claim your access.`, {
-          parse_mode: 'Markdown',
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: db.config.checkJoinButtonText || '🔵 CHECK JOIN', callback_data: 'check_in', style: getTelegramButtonStyle(db.config.checkButtonColor, 'success') }]
-            ]
-          }
+      if (isAutoApprove) {
+        // Auto-approve user join request using Telegram API
+        await callTelegramApi(token, 'approveChatJoinRequest', {
+          chat_id: chat.id,
+          user_id: user.id
         });
-      } catch {
-        // user might not have started bot
+
+        let botUser = db.users.find((u) => u.telegramId === String(user.id));
+        if (!botUser) {
+          botUser = {
+            telegramId: String(user.id),
+            username: user.username || '',
+            firstName: user.first_name || 'User',
+            isVerified: false,
+            joinedChannels: [],
+            joinedAt: new Date().toISOString(),
+            lastActiveAt: new Date().toISOString(),
+            hasLeftRequired: false,
+            leftChannelsAlertCount: 0,
+            referralCode: `ref_${user.id}`,
+            referralCount: 0,
+            bonusBalance: 0,
+            claimedCodes: []
+          };
+          db.users.push(botUser);
+        }
+
+        if (matchedChannel && !botUser.joinedChannels.includes(matchedChannel.id)) {
+          botUser.joinedChannels.push(matchedChannel.id);
+        }
+
+        // Check if all required channels are fulfilled
+        const requiredChannels = db.channels.filter((c) => c.required);
+        if (requiredChannels.length > 0 && requiredChannels.every((c) => botUser.joinedChannels.includes(c.id))) {
+          botUser.hasLeftRequired = false;
+        }
+
+        saveDatabase();
+
+        db.logs.unshift({
+          id: `log-${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          type: 'join',
+          user: `${user.first_name || 'User'} (${user.id})`,
+          details: `Auto-approved join request for ${chat.title || chat.username || chat.id} created by bot approval link!`
+        });
+
+        try {
+          await sendTelegramMessageSafe(token, user.id, `🎉 *JOIN REQUEST APPROVED!*\n\nYour request to join *${chat.title || 'Official Channel'}* has been automatically approved!\n\nPlease return to the bot and press 🔵 CHECK JOIN to verify and claim your access.`, {
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: db.config.checkJoinButtonText || '🔵 CHECK JOIN', callback_data: 'check_in', style: getTelegramButtonStyle(db.config.checkButtonColor, 'success') }]
+              ]
+            }
+          });
+        } catch {
+          // user might not have started bot
+        }
+      } else {
+        // Auto-Approval is OFF: Request remains pending for manual channel admin approval in Telegram
+        db.logs.unshift({
+          id: `log-${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          type: 'join',
+          user: `${user.first_name || 'User'} (${user.id})`,
+          details: `Join request received for ${chat.title || chat.username || chat.id} (Auto-approval is OFF - awaiting manual admin review).`
+        });
+
+        try {
+          await sendTelegramMessageSafe(token, user.id, `⏳ *JOIN REQUEST SUBMITTED!*\n\nYour request to join *${chat.title || 'Official Channel'}* is currently under review.\n\n_Auto-approval is turned OFF. Channel Admin will manually approve your request in Telegram. Once approved, return here and press 🔵 CHECK JOIN!_`, {
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: db.config.checkJoinButtonText || '🔵 CHECK JOIN', callback_data: 'check_in', style: getTelegramButtonStyle(db.config.checkButtonColor, 'success') }]
+              ]
+            }
+          });
+        } catch {
+          // user might not have started bot
+        }
       }
     }
 
@@ -1161,6 +1414,7 @@ async function processTelegramUpdate(update: any) {
 
         // 1. Master Admin Menu
         if (data === 'adm_menu') {
+          const autoApproveOn = db.config.autoApproveJoinRequests !== false;
           await callTelegramApi(token, 'sendMessage', {
             chat_id: chatId,
             text: `👑 *TeleForce Master Admin Control Panel*\n\nWelcome, *${fromUser.first_name}*!\nSelect any function below to configure with 1-click:`,
@@ -1168,13 +1422,61 @@ async function processTelegramUpdate(update: any) {
             reply_markup: {
               inline_keyboard: [
                 [{ text: '📊 Live Bot Stats', callback_data: 'adm_stats', style: 'primary' }, { text: '📢 Channels List', callback_data: 'adm_channels', style: 'primary' }],
+                [{ text: `⚡ Auto-Approval: ${autoApproveOn ? 'ON ✅ (Tap to OFF)' : 'OFF 🚫 (Tap to ON)'}`, callback_data: 'adm_toggle_auto_approve', style: autoApproveOn ? 'primary' : 'danger' }],
                 [{ text: '👥 Groups-Wise Audience', callback_data: 'adm_groupswise', style: 'primary' }, { text: '🔗 Invite & Exclusive Link', callback_data: 'adm_links', style: 'primary' }],
                 [{ text: '✏️ Edit Force Text', callback_data: 'adm_edit_force', style: 'primary' }, { text: '⚠️ Edit Leave Alert', callback_data: 'adm_edit_leave', style: 'danger' }],
                 [{ text: '🔘 Button Labels & Colors', callback_data: 'adm_edit_btns', style: 'primary' }, { text: '🎁 Verification Post', callback_data: 'adm_post', style: 'primary' }],
                 [{ text: '🔑 Claim Codes Manager', callback_data: 'adm_codes', style: 'primary' }, { text: '⚡ Instant Broadcast', callback_data: 'adm_bcast', style: 'primary' }],
+                [{ text: '🗑️ Delete Last Broadcast from Users', callback_data: 'adm_del_last_bcast', style: 'danger' }],
                 [{ text: '💾 Database Vault (Backup)', callback_data: 'adm_db', style: 'primary' }, { text: '🧹 Clear Old Data', callback_data: 'adm_cleardata', style: 'danger' }],
                 [{ text: '💎 Bonus Rewards', callback_data: 'adm_bonus', style: 'primary' }, { text: '🚀 24/7 Hosting Status', callback_data: 'adm_host', style: 'primary' }]
               ]
+            }
+          });
+          return;
+        }
+
+        // Toggle Auto-Approval
+        if (data === 'adm_toggle_auto_approve') {
+          const current = db.config.autoApproveJoinRequests !== false;
+          db.config.autoApproveJoinRequests = !current;
+          saveDatabase();
+
+          const nowState = db.config.autoApproveJoinRequests;
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: nowState
+              ? `⚡ *AUTO-APPROVAL TURNED ON!* ✅\n\nBot will now automatically approve user join requests instantly upon receiving them.`
+              : `🚫 *AUTO-APPROVAL TURNED OFF!* 🛑\n\nBot will STOP auto-approving join requests.\nRequests will remain pending in Telegram for manual admin approval in Telegram channel/group settings.\n\n💡 Command to change anytime:\n• \`/autoapproval on\`\n• \`/autoapproval off\``,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: nowState ? '🚫 Turn OFF Auto-Approval' : '⚡ Turn ON Auto-Approval', callback_data: 'adm_toggle_auto_approve' }],
+                [{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]
+              ]
+            }
+          });
+          return;
+        }
+
+        // Delete Last Broadcast from Users
+        if (data === 'adm_del_last_bcast' || data.startsWith('adm_del_bcast_')) {
+          const bcastId = data.startsWith('adm_del_bcast_') ? data.replace('adm_del_bcast_', '') : 'last';
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `⏳ *Deleting broadcast from all users' Telegram screens...* Please wait.`,
+            parse_mode: 'Markdown'
+          });
+
+          const delResult = await deleteBroadcastFromUsers(bcastId);
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: delResult.success
+              ? `🗑️ *BROADCAST DELETED FROM USERS' SCREENS!*\n\n${delResult.message}\nTotal affected users: *${delResult.affectedUsers}*`
+              : `⚠️ *Deletion Notice:*\n\n${delResult.message}`,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [[{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]]
             }
           });
           return;
@@ -2005,8 +2307,11 @@ async function processTelegramUpdate(update: any) {
         const missing: ForceJoinChannel[] = [];
 
         for (const ch of requiredChannels) {
-          let isMember = await checkTelegramChatMember(token, ch.channelId, fromUser.id);
-          if (!isMember) {
+          const isAutoApprove = (ch as any).autoApprove !== undefined
+            ? (ch as any).autoApprove
+            : (db.config.autoApproveJoinRequests !== false);
+          let isMember = await checkTelegramChatMember(token, ch.channelId, fromUser.id, isAutoApprove);
+          if (!isMember && isAutoApprove) {
             try {
               const approveRes = await callTelegramApi(token, 'approveChatJoinRequest', {
                 chat_id: ch.channelId,
@@ -2601,7 +2906,7 @@ async function processTelegramUpdate(update: any) {
           dispatchResult = await dispatchBroadcastToUsers(token, eligibleRecipients, { text: bcastMsg });
         }
 
-        // Save in broadcasts history
+        // Save in broadcasts history with tracked user message IDs for instant deletion / editing
         const bcastEntry: BroadcastMessage = {
           id: `bc-${Date.now()}`,
           title: isReply ? 'Reply Copy Broadcast' : `Broadcast: "${bcastMsg.slice(0, 32)}..."`,
@@ -2612,7 +2917,8 @@ async function processTelegramUpdate(update: any) {
           sentCount: dispatchResult.sent,
           totalRecipients: eligibleRecipients.length,
           createdAt: new Date().toISOString(),
-          executedAt: new Date().toISOString()
+          executedAt: new Date().toISOString(),
+          sentMessages: (dispatchResult as any).sentMessages || []
         };
         db.broadcasts.unshift(bcastEntry);
         saveDatabase();
@@ -2622,7 +2928,7 @@ async function processTelegramUpdate(update: any) {
           timestamp: new Date().toISOString(),
           type: 'broadcast',
           user: `${fromUser.first_name} (${fromUser.id})`,
-          details: `Dispatched broadcast to ${dispatchResult.sent} users (${dispatchResult.failed} failed/blocked).`
+          details: `Dispatched broadcast to ${dispatchResult.sent} users (${dispatchResult.failed} failed/blocked). Tracked ${bcastEntry.sentMessages?.length || 0} user message IDs for deletion/editing.`
         });
 
         await callTelegramApi(token, 'sendMessage', {
@@ -2631,10 +2937,190 @@ async function processTelegramUpdate(update: any) {
             `• Target Audience: *${targetType}*\n` +
             `• Delivered: *${dispatchResult.sent} users*\n` +
             `• Failed / Blocked: *${dispatchResult.failed} users*\n` +
-            `• Time IST: \`${getISTDateString()}\``,
+            `• Time IST: \`${getISTDateString()}\`\n\n` +
+            `💡 *Mistake? Delete / Edit commands:*\n` +
+            `• \`/delbroadcast last\` - Delete from all recipients' screens\n` +
+            `• \`/editbroadcast last <New Text>\` - Edit text on all screens\n` +
+            `• \`/replacelink <OldURL> <NewURL>\` - Replace link across users`,
           parse_mode: 'Markdown',
           reply_markup: {
-            inline_keyboard: [[{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]]
+            inline_keyboard: [
+              [{ text: '🗑️ Delete from Users Now', callback_data: `adm_del_bcast_${bcastEntry.id}`, style: 'danger' }],
+              [{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]
+            ]
+          }
+        });
+        return;
+      }
+
+      // ----------------------------------------------------
+      // NEW: Admin Commands for Auto-Approval & Broadcasts
+      // ----------------------------------------------------
+
+      // Handle Admin /autoapproval <on|off> or /autoapprove or /setautoapprove
+      if ((text.startsWith('/autoapproval') || text.startsWith('/autoapprove') || text.startsWith('/setautoapprove')) && isAdmin) {
+        const arg = text.replace(/^\/(autoapproval|autoapprove|setautoapprove)/, '').trim().toLowerCase();
+
+        if (arg === 'off' || arg === 'false' || arg === '0' || arg === 'disable') {
+          db.config.autoApproveJoinRequests = false;
+          saveDatabase();
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `🚫 *AUTO-APPROVAL HAS BEEN TURNED OFF!*\n\n` +
+              `• Status: *OFF 🛑*\n` +
+              `• User Join Requests: *Pending for manual admin review in Telegram*\n` +
+              `• The bot will NOT automatically approve channel join requests.\n\n` +
+              `💡 To turn it back ON anytime, send: \`/autoapproval on\``,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '⚡ Turn ON Auto-Approval', callback_data: 'adm_toggle_auto_approve' }],
+                [{ text: '🔙 Admin Menu', callback_data: 'adm_menu' }]
+              ]
+            }
+          });
+          return;
+        } else if (arg === 'on' || arg === 'true' || arg === '1' || arg === 'enable') {
+          db.config.autoApproveJoinRequests = true;
+          saveDatabase();
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `⚡ *AUTO-APPROVAL HAS BEEN TURNED ON!*\n\n` +
+              `• Status: *ACTIVE ✅*\n` +
+              `• User Join Requests: *Instantly auto-approved by Bot*\n\n` +
+              `💡 To turn it OFF anytime, send: \`/autoapproval off\``,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🚫 Turn OFF Auto-Approval', callback_data: 'adm_toggle_auto_approve' }],
+                [{ text: '🔙 Admin Menu', callback_data: 'adm_menu' }]
+              ]
+            }
+          });
+          return;
+        } else {
+          const isCurrentlyOn = db.config.autoApproveJoinRequests !== false;
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `⚡ *CHANNEL JOIN AUTO-APPROVAL CONTROLLER*\n\n` +
+              `Current Status: *${isCurrentlyOn ? 'ON ✅ (Auto-Approving)' : 'OFF 🚫 (Manual Review Only)'}*\n\n` +
+              `💡 *Commands to control:* \n` +
+              `• \`/autoapproval off\` - Turn OFF (Bot stops approving, channels require manual approval)\n` +
+              `• \`/autoapproval on\` - Turn ON (Bot auto-approves all requests instantly)\n\n` +
+              `Or use 1-click button below:`,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: isCurrentlyOn ? '🚫 Turn OFF Auto-Approval' : '⚡ Turn ON Auto-Approval', callback_data: 'adm_toggle_auto_approve', style: isCurrentlyOn ? 'danger' : 'primary' }],
+                [{ text: '🔙 Admin Menu', callback_data: 'adm_menu' }]
+              ]
+            }
+          });
+          return;
+        }
+      }
+
+      // Handle Admin /delbroadcast [id|last] or /delbcast [id|last]
+      if ((text.startsWith('/delbroadcast') || text.startsWith('/delbcast') || text.startsWith('/del_broadcast')) && isAdmin) {
+        const param = text.replace(/^\/(delbroadcast|delbcast|del_broadcast)/, '').trim() || 'last';
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: `⏳ *Deleting broadcast from all users' Telegram screens...* (Target: ${param})`,
+          parse_mode: 'Markdown'
+        });
+
+        const delRes = await deleteBroadcastFromUsers(param);
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: delRes.success
+            ? `🗑️ *BROADCAST DELETED FROM USERS' SCREENS!*\n\n${delRes.message}\nTotal deleted messages: *${delRes.affectedUsers}*`
+            : `⚠️ *Deletion Failed:* ${delRes.message}`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '🔙 Admin Menu', callback_data: 'adm_menu' }]]
+          }
+        });
+        return;
+      }
+
+      // Handle Admin /editbroadcast <id|last> <new_text> or /editbcast <new_text>
+      if ((text.startsWith('/editbroadcast') || text.startsWith('/editbcast')) && isAdmin) {
+        let clean = text.replace(/^\/(editbroadcast|editbcast)/, '').trim();
+        let targetId = 'last';
+        let newText = clean;
+
+        // Check if first word is an ID or 'last'
+        const firstSpace = clean.indexOf(' ');
+        if (firstSpace > 0) {
+          const firstWord = clean.substring(0, firstSpace).trim();
+          if (firstWord.startsWith('bc-') || firstWord === 'last') {
+            targetId = firstWord;
+            newText = clean.substring(firstSpace).trim();
+          }
+        }
+
+        if (!newText) {
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `⚠️ *Usage:* \`/editbroadcast [id|last] <New Text>\`\n\nExample:\n\`/editbroadcast last Hello everyone! New verified links have been updated.\``,
+            parse_mode: 'Markdown'
+          });
+          return;
+        }
+
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: `⏳ *Updating broadcast on all recipients' screens...* Please wait.`,
+          parse_mode: 'Markdown'
+        });
+
+        const editRes = await editBroadcastOnUsers(targetId, { newText });
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: editRes.success
+            ? `✏️ *BROADCAST EDITED ON ALL SCREENS!*\n\n${editRes.message}\nTotal affected users: *${editRes.affectedUsers}*`
+            : `⚠️ *Edit Failed:* ${editRes.message}`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '🔙 Admin Menu', callback_data: 'adm_menu' }]]
+          }
+        });
+        return;
+      }
+
+      // Handle Admin /replacelink <old_url> <new_url> or /replacebroadcastlink <old_url> <new_url>
+      if ((text.startsWith('/replacelink') || text.startsWith('/replacebroadcastlink')) && isAdmin) {
+        const clean = text.replace(/^\/(replacelink|replacebroadcastlink)/, '').trim();
+        const parts = clean.split(/\s+/);
+        if (parts.length < 2) {
+          await callTelegramApi(token, 'sendMessage', {
+            chat_id: chatId,
+            text: `⚠️ *Usage:* \`/replacelink <old_url> <new_url>\`\n\nExample:\n\`/replacelink https://wrong.com https://correct.com\`\n\n(Yeh command last broadcast ke message text aur button link ko replace kar dega!)`,
+            parse_mode: 'Markdown'
+          });
+          return;
+        }
+
+        const [oldUrl, newUrl] = parts;
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: `⏳ *Replacing link in sent broadcast across all users...*\nFrom: \`${oldUrl}\`\nTo: \`${newUrl}\``,
+          parse_mode: 'Markdown'
+        });
+
+        const editRes = await editBroadcastOnUsers('last', {
+          replaceOldUrl: oldUrl,
+          replaceNewUrl: newUrl
+        });
+
+        await callTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: editRes.success
+            ? `🔗 *LINK REPLACED IN USERS' SCREENS!*\n\n${editRes.message}\nTotal updated users: *${editRes.affectedUsers}*`
+            : `⚠️ *Link Replacement Failed:* ${editRes.message}`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '🔙 Admin Menu', callback_data: 'adm_menu' }]]
           }
         });
         return;
@@ -4165,6 +4651,7 @@ app.post('/api/broadcasts', (req: Request, res: Response) => {
       buttonUrl: postContent.buttonUrl
     }).then((res) => {
       newBroadcast.sentCount = res.sent;
+      newBroadcast.sentMessages = res.sentMessages;
       saveDatabase();
     }).catch(console.error);
   }
@@ -4208,6 +4695,7 @@ app.post('/api/broadcasts/:id/send-now', (req: Request, res: Response) => {
       buttonUrl: broadcast.postContent.buttonUrl
     }).then((res) => {
       broadcast.sentCount = res.sent;
+      broadcast.sentMessages = res.sentMessages;
       saveDatabase();
     }).catch(console.error);
   } else {
@@ -4224,6 +4712,51 @@ app.post('/api/broadcasts/:id/send-now', (req: Request, res: Response) => {
   });
 
   res.json({ success: true, broadcast });
+});
+
+// Delete broadcast from all recipients' Telegram screens (e.g. sent by mistake)
+app.post('/api/broadcasts/:id/delete-from-users', async (req: Request, res: Response) => {
+  const result = await deleteBroadcastFromUsers(req.params.id);
+  res.json(result);
+});
+
+// Delete last sent broadcast from all users
+app.post('/api/broadcasts/delete-last', async (req: Request, res: Response) => {
+  const result = await deleteBroadcastFromUsers('last');
+  res.json(result);
+});
+
+// Edit broadcast text or replace links on all recipients' screens
+app.post('/api/broadcasts/:id/edit-on-users', async (req: Request, res: Response) => {
+  const { newText, replaceOldUrl, replaceNewUrl, newButtonText, newButtonUrl } = req.body;
+  const result = await editBroadcastOnUsers(req.params.id, {
+    newText,
+    replaceOldUrl,
+    replaceNewUrl,
+    newButtonText,
+    newButtonUrl
+  });
+  res.json(result);
+});
+
+// Toggle Auto-Approval setting via 1-click REST endpoint
+app.post('/api/config/toggle-auto-approve', (req: Request, res: Response) => {
+  const newState = req.body?.enabled !== undefined
+    ? Boolean(req.body.enabled)
+    : !(db.config.autoApproveJoinRequests !== false);
+
+  db.config.autoApproveJoinRequests = newState;
+  saveDatabase();
+
+  db.logs.unshift({
+    id: `log-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    type: 'admin',
+    user: 'Admin Panel',
+    details: `Channel Join Auto-Approval toggled to: ${newState ? 'ON' : 'OFF'}`
+  });
+
+  res.json({ success: true, autoApproveJoinRequests: db.config.autoApproveJoinRequests });
 });
 
 app.delete('/api/broadcasts/:id', (req: Request, res: Response) => {

@@ -216,6 +216,31 @@ export default function App() {
     await loadData();
   };
 
+  const handleDeleteBroadcastFromUsers = async (id: string) => {
+    const res = await fetch(`/api/broadcasts/${id}/delete-from-users`, { method: 'POST' });
+    const data = await res.json();
+    await loadData();
+    return data;
+  };
+
+  const handleEditBroadcastOnUsers = async (id: string, options: any) => {
+    const res = await fetch(`/api/broadcasts/${id}/edit-on-users`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(options)
+    });
+    const data = await res.json();
+    await loadData();
+    return data;
+  };
+
+  const handleDeleteLastBroadcast = async () => {
+    const res = await fetch('/api/broadcasts/delete-last', { method: 'POST' });
+    const data = await res.json();
+    await loadData();
+    return data;
+  };
+
   // Handlers for Admins
   const handleAddAdmin = async (adminData: Partial<AdminUser>) => {
     const res = await fetch('/api/admins', {
@@ -422,6 +447,9 @@ export default function App() {
                 onSendBroadcast={handleSendBroadcast}
                 onTriggerNow={handleTriggerBroadcastNow}
                 onDeleteBroadcast={handleDeleteBroadcast}
+                onDeleteBroadcastFromUsers={handleDeleteBroadcastFromUsers}
+                onEditBroadcastOnUsers={handleEditBroadcastOnUsers}
+                onDeleteLastBroadcast={handleDeleteLastBroadcast}
               />
             )}
 

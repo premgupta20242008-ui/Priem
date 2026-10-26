@@ -28,7 +28,8 @@
     "backupGroupName": "PrimeAds Database Vault",
     "autoBackupToGroup": true,
     "lastBackupTimestamp": "2026-10-25 10:38:16",
-    "lastBackupMessageId": 857
+    "lastBackupMessageId": 857,
+    "autoApproveJoinRequests": true
   },
   "channels": [
     {
@@ -2367,6 +2368,13 @@
     }
   ],
   "logs": [
+    {
+      "id": "log-1793004585676",
+      "timestamp": "2026-10-26T08:49:45.676Z",
+      "type": "admin",
+      "user": "Admin Panel",
+      "details": "Channel Join Auto-Approval toggled to: OFF"
+    },
     {
       "id": "log-1792904898832",
       "timestamp": "2026-10-25T05:08:18.832Z",

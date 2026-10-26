@@ -283,6 +283,44 @@ export const BotSettings: React.FC<BotSettingsProps> = ({
               />
             </div>
 
+            {/* Auto-Approval for Channel Join Requests */}
+            <div className="border-t border-slate-800 pt-3">
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <label className="text-xs font-semibold text-white flex items-center gap-2">
+                    <span className="text-amber-400">⚡</span>
+                    Channel Join Request Auto-Approval
+                  </label>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    Controls whether the bot automatically approves join requests or leaves them pending for manual admin review in Telegram.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setFormData({ ...formData, autoApproveJoinRequests: formData.autoApproveJoinRequests === false ? true : false })}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+                    formData.autoApproveJoinRequests !== false
+                      ? 'bg-emerald-600/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-600/30'
+                      : 'bg-red-600/20 text-red-300 border border-red-500/40 hover:bg-red-600/30'
+                  }`}
+                >
+                  <span className={`w-2 h-2 rounded-full ${formData.autoApproveJoinRequests !== false ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`}></span>
+                  <span>{formData.autoApproveJoinRequests !== false ? 'AUTO-APPROVAL: ON' : 'AUTO-APPROVAL: OFF'}</span>
+                </button>
+              </div>
+
+              <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-slate-400 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+                <span>
+                  {formData.autoApproveJoinRequests !== false
+                    ? '✅ Auto-Approval is ON: Bot approves user requests immediately.'
+                    : '🛑 Auto-Approval is OFF: Requests wait for manual approval by channel admin in Telegram.'}
+                </span>
+                <span className="font-mono text-[10px] text-blue-300 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-900/40">
+                  Command: /autoapproval {formData.autoApproveJoinRequests !== false ? 'off' : 'on'}
+                </span>
+              </div>
+            </div>
+
             {/* Bonus Rewards */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 border-t border-slate-800 pt-3">
               <div>
