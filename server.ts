@@ -2003,13 +2003,20 @@ async function processTelegramUpdate(update: any) {
           await callTelegramApi(token, 'sendMessage', {
             chat_id: chatId,
             text: `⚡ *INSTANT BROADCAST TO VERIFIED USERS*\n\n` +
-              `• Target Audience: *${verifiedCount} Verified Users*\n\n` +
-              `💡 *To send custom broadcast, type:*\n\`/broadcast Your announcement message here\`\n\n` +
-              `Or send a test announcement right now:`,
+              `• Target Audience: *${verifiedCount} Verified Users*\n` +
+              `• Tracked Past Broadcasts: *${db.broadcasts.length}*\n\n` +
+              `💡 *How to Broadcast:*\n` +
+              `• Direct: \`/bc Your announcement message\`\n` +
+              `• Reply: Send media/photo, then reply with \`/bc\`\n\n` +
+              `💡 *Mistake Deletion & Editing:*\n` +
+              `• \`/delbroadcast last\` - Delete from all users' screens\n` +
+              `• \`/replacelink <old> <new>\` - Replace URL across all users\n` +
+              `• \`/editbroadcast last <text>\` - Edit text across all users`,
             parse_mode: 'Markdown',
             reply_markup: {
               inline_keyboard: [
                 [{ text: '📢 Send Test Announcement Now', callback_data: 'adm_send_test_bcast', style: 'primary' }],
+                [{ text: '🗑️ Delete Last Broadcast from Users', callback_data: 'adm_del_last_bcast', style: 'danger' }],
                 [{ text: '🔙 Back to Admin Menu', callback_data: 'adm_menu' }]
               ]
             }
@@ -2587,18 +2594,27 @@ async function processTelegramUpdate(update: any) {
           return;
         }
 
+        const autoApproveOn = db.config.autoApproveJoinRequests !== false;
         await callTelegramApi(token, 'sendMessage', {
           chat_id: chatId,
-          text: `👑 *TeleForce Master Admin Control Panel*\n\nWelcome, *${fromUser.first_name}*!\nSelect any function below to configure with 1-click:`,
+          text: `👑 *TeleForce Master Admin Control Panel*\n\n` +
+            `Welcome, *${fromUser.first_name}*!\n\n` +
+            `• Auto-Approval: *${autoApproveOn ? 'ON ✅ (Auto-Approving)' : 'OFF 🛑 (Manual Channel Review)'}*\n` +
+            `• Bot Engine: *${db.config.isPollingActive !== false ? 'RUNNING 🟢' : 'PAUSED 🔴'}*\n` +
+            `• Verified Users: *${db.users.filter((u) => u.isVerified && !u.hasLeftRequired).length}*\n\n` +
+            `Tap any button below for 1-click action:`,
           parse_mode: 'Markdown',
           reply_markup: {
             inline_keyboard: [
               [{ text: '📊 Live Bot Stats', callback_data: 'adm_stats', style: 'primary' }, { text: '📢 Channels List', callback_data: 'adm_channels', style: 'primary' }],
+              [{ text: `⚡ Auto-Approval: ${autoApproveOn ? 'ON ✅ (Tap to OFF)' : 'OFF 🛑 (Tap to ON)'}`, callback_data: 'adm_toggle_auto_approve', style: autoApproveOn ? 'primary' : 'danger' }],
+              [{ text: '⚡ Instant Broadcast', callback_data: 'adm_bcast', style: 'primary' }, { text: '🗑️ Delete Last Broadcast', callback_data: 'adm_del_last_bcast', style: 'danger' }],
+              [{ text: '👥 Groups-Wise Audience', callback_data: 'adm_groupswise', style: 'primary' }, { text: '🔗 Invite & Exclusive Link', callback_data: 'adm_links', style: 'primary' }],
               [{ text: '✏️ Edit Force Text', callback_data: 'adm_edit_force', style: 'primary' }, { text: '⚠️ Edit Leave Alert', callback_data: 'adm_edit_leave', style: 'danger' }],
               [{ text: '🔘 Button Labels & Colors', callback_data: 'adm_edit_btns', style: 'primary' }, { text: '🎁 Verification Post', callback_data: 'adm_post', style: 'primary' }],
-              [{ text: '🔑 Claim Codes Manager', callback_data: 'adm_codes', style: 'primary' }, { text: '⚡ Instant Broadcast', callback_data: 'adm_bcast', style: 'primary' }],
-              [{ text: '💾 Database Vault (Group Backup)', callback_data: 'adm_db', style: 'primary' }, { text: '💎 Bonus Rewards', callback_data: 'adm_bonus', style: 'primary' }],
-              [{ text: '👥 Admins & Users', callback_data: 'adm_admins', style: 'primary' }, { text: '🚀 24/7 Hosting Status', callback_data: 'adm_host', style: 'primary' }]
+              [{ text: '🔑 Claim Codes Manager', callback_data: 'adm_codes', style: 'primary' }, { text: '💾 Database Vault', callback_data: 'adm_db', style: 'primary' }],
+              [{ text: '💎 Bonus Rewards', callback_data: 'adm_bonus', style: 'primary' }, { text: '🧹 Clear Old Data', callback_data: 'adm_cleardata', style: 'danger' }],
+              [{ text: '🚀 24/7 Hosting Status', callback_data: 'adm_host', style: 'primary' }]
             ]
           }
         });

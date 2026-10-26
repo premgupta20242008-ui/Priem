@@ -2369,6 +2369,13 @@
   ],
   "logs": [
     {
+      "id": "log-1793005611518",
+      "timestamp": "2026-10-26T09:06:51.518Z",
+      "type": "admin",
+      "user": "Admin Panel",
+      "details": "Channel Join Auto-Approval toggled to: OFF"
+    },
+    {
       "id": "log-1793004585676",
       "timestamp": "2026-10-26T08:49:45.676Z",
       "type": "admin",

@@ -23,6 +23,8 @@ interface ChannelsManagerProps {
   onDeleteChannel: (id: string) => Promise<void>;
   onSimulateLeave: (channelId: string) => void;
   onRefreshData?: () => Promise<void>;
+  autoApproveJoinRequests?: boolean;
+  onToggleAutoApprove?: () => Promise<any>;
 }
 
 export const ChannelsManager: React.FC<ChannelsManagerProps> = ({
@@ -30,7 +32,9 @@ export const ChannelsManager: React.FC<ChannelsManagerProps> = ({
   onAddChannel,
   onDeleteChannel,
   onSimulateLeave,
-  onRefreshData
+  onRefreshData,
+  autoApproveJoinRequests,
+  onToggleAutoApprove
 }) => {
   const [showAddForm, setShowAddForm] = useState(false);
   const [formData, setFormData] = useState({
@@ -160,6 +164,52 @@ export const ChannelsManager: React.FC<ChannelsManagerProps> = ({
             </p>
           </div>
         </div>
+      </div>
+
+      {/* ⚡ Channel Join Request Auto-Approval Controller */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-sm">
+        <div className="flex items-center gap-3">
+          <div className={`p-2.5 rounded-xl border shrink-0 ${
+            autoApproveJoinRequests !== false
+              ? 'bg-emerald-600/20 border-emerald-500/40 text-emerald-400'
+              : 'bg-red-600/20 border-red-500/40 text-red-400'
+          }`}>
+            <Sparkles className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-sm text-white">Channel Join Request Auto-Approval</span>
+              <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
+                autoApproveJoinRequests !== false
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                  : 'bg-red-500/20 text-red-300 border-red-500/40'
+              }`}>
+                {autoApproveJoinRequests !== false ? 'ACTIVE: ON ✅' : 'DISABLED: OFF 🛑'}
+              </span>
+            </div>
+            <p className="text-xs text-slate-300 mt-0.5">
+              {autoApproveJoinRequests !== false
+                ? 'Bot user join requests ko turant automatically approve karta hai. Users bina waiting ke direct verified hote hain.'
+                : 'Auto-approval band hai. Join requests Telegram channel me Pending rahengi aur Channel Admin ko manually approve karni hongi.'}
+            </p>
+            <div className="text-[11px] font-mono text-slate-400 mt-1">
+              Telegram bot command: <code className="text-blue-300 bg-blue-950/60 px-1.5 py-0.5 rounded border border-blue-900/40">/autoapproval {autoApproveJoinRequests !== false ? 'off' : 'on'}</code>
+            </div>
+          </div>
+        </div>
+
+        {onToggleAutoApprove && (
+          <button
+            onClick={onToggleAutoApprove}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-md flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer ${
+              autoApproveJoinRequests !== false
+                ? 'bg-gradient-to-r from-red-600 to-rose-700 hover:brightness-110 text-white shadow-red-600/30'
+                : 'bg-gradient-to-r from-emerald-600 to-teal-700 hover:brightness-110 text-white shadow-emerald-600/30'
+            }`}
+          >
+            <span>{autoApproveJoinRequests !== false ? '🛑 Turn OFF Auto-Approval' : '⚡ Turn ON Auto-Approval'}</span>
+          </button>
+        )}
       </div>
 
       {/* KPI Overview Cards */}
